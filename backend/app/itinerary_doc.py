@@ -16,6 +16,7 @@ from .assistant import _model
 from .config import settings
 from .models import Place, Point, DayPlan, Stop, Leg
 from .places import calculate_route, search_places
+from .opening_hours import collect_opening_hours, opening_window, preferred_time, closed_for_date
 
 
 # These are generic POI categories, not unambiguous named destinations.
@@ -193,6 +194,19 @@ async def build_itinerary(request, progress: Callable[[int, str], Awaitable[None
     if any(not items for items in day_places):
         raise HTTPException(502, "行程分天失败")
     await report(60, "已完成行程分天，准备交通规划")
+    await report(61, "核实景点开放时间并优化访问时段")
+    opening_hours = await collect_opening_hours(selected)
+    for group in day_places:
+        # Closed-earlier venues should precede late-opening and evening requests.
+        def visit_rank(place: Place) -> tuple[int, int]:
+            hours = opening_window(opening_hours.get(place.placeId))
+            preference = preferred_time(request.requirements, place.name)
+            if preference == "night" and (hours is None or hours.end >= 19 * 60):
+                return (2, hours.end if hours else 24 * 60)
+            if preference == "morning" or (preference == "night" and hours is not None):
+                return (0, hours.end if hours else 24 * 60)
+            return (1, hours.end if hours else 24 * 60)
+        group.sort(key=visit_rank)
     lodging = request.lodging.strip() if request.lodging else ""
     lodging_point = getattr(request, "lodgingLocation", None) or (await _lodging_point(lodging) if lodging else None)
     lines = [f"# 武汉{request.days}日旅行计划", "", "## 旅行概览", "",
@@ -214,10 +228,13 @@ async def build_itinerary(request, progress: Callable[[int, str], Awaitable[None
         day_stops: list[Stop] = []
         day_legs: list[Leg] = []
         day_transport_minutes = 0
+        day_warnings: list[str] = []
+        actual_date = first_date + timedelta(days=day_index) if first_date else None
         if lodging_point:
             route = await calculate_route(lodging_point, items[0].location, mode)
             route_sources.add(route["source"])
             lines.append(f"| 出发 | {lodging} | 住宿出发 | {_route_text(route, mode)} |")
+            current_time += timedelta(minutes=route["minutes"])
         for index, place in enumerate(items):
             if place.placeId in seen_ids:
                 raise HTTPException(502, "地点重复分配，行程未保存")
@@ -229,13 +246,35 @@ async def build_itinerary(request, progress: Callable[[int, str], Awaitable[None
                 lunch_end = lunch_start + timedelta(minutes=75)
                 lines.append(f"| 午餐与休息 | {items[index-1].name}周边 | {lunch_start:%H:%M}–{lunch_end:%H:%M}；就近用餐和休息 | 步行或短途移动，未指定餐厅 |")
                 current_time = lunch_end
+            opening_label = opening_hours.get(place.placeId)
+            hours = opening_window(opening_label)
+            preference = preferred_time(request.requirements, place.name)
+            issue: str | None = None
+            if opening_label and closed_for_date(opening_label, actual_date):
+                issue = f"{place.name} 在该日可能闭馆（{opening_label}），请调整日期。"
+            if preference == "night":
+                if hours and hours.end <= 18 * 60:
+                    issue = f"{place.name} 核实的常规开放时间为 {opening_label}，不满足夜间游览要求，已尝试安排日间。"
+                else:
+                    current_time = max(current_time, current_time.replace(hour=18, minute=0))
+                    if not hours:
+                        issue = f"{place.name} 的夜间开放时间未核实，晚间安排仅为待确认计划。"
+            elif preference == "afternoon":
+                current_time = max(current_time, current_time.replace(hour=12, minute=0))
+            if hours and (current_time.hour * 60 + current_time.minute) < hours.start:
+                current_time = current_time.replace(hour=hours.start // 60, minute=hours.start % 60)
             arrival = current_time
             departure = arrival + timedelta(minutes=stop_minutes)
+            if hours and departure.hour * 60 + departure.minute > hours.end:
+                issue = f"{place.name} 预计 {arrival:%H:%M}–{departure:%H:%M} 游览超出核实的开放时间（{opening_label}），需要调整当天路线。"
+            if issue:
+                day_warnings.append(issue)
             marker = "【必去】" if place.placeId in required_ids else "【AI推荐】"
             phase = "上午" if arrival.hour < 12 else "下午" if arrival.hour < 18 else "晚间"
             action = "停留办理或查看约" if stop_minutes == 20 else "建议游览约"
-            lines.append(f"| {phase} | {marker}{place.name}（{place.category}） | {arrival:%H:%M}–{departure:%H:%M}；{action} {stop_minutes} 分钟 | {('首站' if index == 0 else transport_text)} |")
-            day_stops.append(Stop(id=day_stop_ids[index], place=place, arrival=f"{arrival:%H:%M}", departure=f"{departure:%H:%M}", minutes=stop_minutes))
+            hours_text = f"；开放时间：{opening_label}" if opening_label else "；开放时间待核实"
+            lines.append(f"| {phase} | {marker}{place.name}（{place.category}） | {arrival:%H:%M}–{departure:%H:%M}；{action} {stop_minutes} 分钟{hours_text} | {('首站' if index == 0 else transport_text)} |")
+            day_stops.append(Stop(id=day_stop_ids[index], place=place, arrival=f"{arrival:%H:%M}", departure=f"{departure:%H:%M}", minutes=stop_minutes, warning=issue))
             current_time = departure
             if index < len(items)-1:
                 leg_mode = "walking" if _meters(place.location, items[index+1].location) < 800 else mode
@@ -254,11 +293,13 @@ async def build_itinerary(request, progress: Callable[[int, str], Awaitable[None
             route = await calculate_route(items[-1].location, lodging_point, mode)
             route_sources.add(route["source"])
             lines.append(f"| 返回住宿 | {lodging} | 当日结束后返回 | {_route_text(route, mode)} |")
-        lines += ["", "### 当日路线", "", " → ".join(p.name for p in items) + "。地点按地理邻近性排序，跨江或拥堵时请以当日导航为准。", "",
-                  "### 注意事项", "", "- 各地点开放、票价与预约信息请在出发前查看地点详情的来源和核查时间。",
-                  "- 交通时间为高德规划值或标明区间的距离估算；实际打车等待、路况和排队需另留弹性。", ""]
+        lines += ["", "### 当日路线", "", " → ".join(p.name for p in items) + "。顺序结合地理位置、开放时间和特定时段偏好安排，路线冲突需以核实信息为准。", "",
+                  "### 注意事项", "", "- 未核实开放时间的地点不得视为已经确认营业。",
+                  "- 交通时间为高德规划值或标明区间的距离估算；实际打车等待、路况和排队需另留弹性。"]
+        lines += ["- **时间冲突**：" + warning for warning in day_warnings]
+        lines.append("")
         await report(62 + round((day_index + 1) / request.days * 31), f"第 {day_index + 1} 天路线已完成")
-        structured_days.append(DayPlan(id=uuid4().hex, date=day_date, stops=day_stops, legs=day_legs, transportMinutes=day_transport_minutes, sightseeingMinutes=sum(stop.minutes for stop in day_stops), meals=["午餐与休息"], budgetNote="费用以当天官方票价与实际交通支出为准", warnings=["地点开放、预约和交通时间请在出发前核实。"]).model_dump())
+        structured_days.append(DayPlan(id=uuid4().hex, date=day_date, stops=day_stops, legs=day_legs, transportMinutes=day_transport_minutes, sightseeingMinutes=sum(stop.minutes for stop in day_stops), meals=["午餐与休息"], budgetNote="费用以当天官方票价与实际交通支出为准", warnings=["尚未核实的地点开放、预约和交通时间请在出发前确认。", *day_warnings]).model_dump())
     missing = [p.name for p in required if p.placeId not in seen_ids]
     if missing or len(day_places) != request.days or any(not day for day in day_places):
         raise HTTPException(502, "行程完整性校验失败：" + "、".join(missing))

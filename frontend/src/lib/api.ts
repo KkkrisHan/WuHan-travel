@@ -57,7 +57,7 @@ export const personalPlaceToPlace = (place: PersonalMapPlace): Place => ({
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const controller = new AbortController();
-  const timeoutMs = path === "/places/info" ? 75000 : path === "/itineraries/generate" ? 180000 : 20000;
+  const timeoutMs = path === "/places/info" ? 75000 : path === "/itineraries/generate" ? 180000 : path === "/preferences/extract-must-visit" ? 35000 : 20000;
   let timedOut = false;
   const timer = window.setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
   const onAbort = () => controller.abort();
@@ -91,6 +91,7 @@ export const api = {
       "/health",
     ),
   featured: () => request<{ places: Place[] }>("/places/featured"),
+  extractMustVisit: (requirements: string) => request<{ places: Place[]; unresolved: string[] }>("/preferences/extract-must-visit", { method: "POST", body: JSON.stringify({ requirements }) }),
   personalPlaces: (trip: Pick<Trip, "id" | "secret">) =>
     request<{ places: PersonalMapPlace[] }>("/places", { headers: tripHeaders(trip) }),
   addPersonalPlace: (trip: Pick<Trip, "id" | "secret">, place: Place) =>

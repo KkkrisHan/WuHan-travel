@@ -70,7 +70,16 @@ export function HotelPicker({ value, location, onChange }: Props) {
       const map = new AMap.Map(container.current, {
         center: [114.3055, 30.5928], zoom: 12, mapStyle: "amap://styles/normal",
       }) as LiveMap;
-      const marker = new AMap.Marker({ position: [114.3055, 30.5928] }) as LiveMarker;
+      // AMap's built-in marker references an obsolete HTTP icon that can return 503.
+      // Use our own HTML/CSS pin so the hotel picker never requests that image.
+      const pin = document.createElement("div");
+      pin.className = "hotel-map-pin";
+      pin.textContent = "⌖";
+      const marker = new AMap.Marker({
+        position: [114.3055, 30.5928],
+        content: pin,
+        offset: new AMap.Pixel(-15, -30),
+      }) as LiveMarker;
       map.add(marker);
       mapRef.current = map;
       markerRef.current = marker;

@@ -216,7 +216,35 @@ function App() {
   };
   const create = async (explore: boolean, preferences?: Preferences) => {
     try {
-      openTrip(await newTrip(explore, preferences));
+      const created = await newTrip(explore, preferences);
+      openTrip(created);
+      const requirements = preferences?.requirements?.trim();
+      if (!explore && requirements) {
+        setNotice("AI 正在从特殊信息中识别必去景点…");
+        try {
+          const extracted = await api.extractMustVisit(requirements);
+          if (extracted.places.length) {
+            await mutateTrip(created.id, "自动识别特殊信息中的必去景点", (draft) => {
+              const ids = new Set(draft.pendingPlaces.map((place) => place.placeId));
+              for (const place of extracted.places) {
+                if (!ids.has(place.placeId)) {
+                  draft.pendingPlaces.push(place);
+                  ids.add(place.placeId);
+                }
+              }
+            }, undefined, "agent");
+          }
+          setNotice(
+            extracted.places.length
+              ? `已从特殊信息中添加 ${extracted.places.length} 个必去景点：${extracted.places.map((place) => place.name).join("、")}${extracted.unresolved.length ? "；部分地点未找到，请手动搜索添加" : ""}`
+              : extracted.unresolved.length
+                ? "识别到地点要求，但地图未找到完全匹配的地点，请手动添加。"
+                : "已检查特殊信息，未找到明确要求的必去景点。",
+          );
+        } catch (error) {
+          setNotice(error instanceof Error ? `自动识别未完成：${error.message}，可手动添加必去景点。` : "自动识别未完成，可手动添加必去景点。");
+        }
+      }
     } catch (error) {
       inform(error);
     }

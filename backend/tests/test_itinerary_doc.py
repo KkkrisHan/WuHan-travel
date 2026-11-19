@@ -23,7 +23,7 @@ class ItineraryDocumentTest(unittest.IsolatedAsyncioTestCase):
         request = SimpleNamespace(mustVisitPlaces=required, people=2, days=4, requirements="慢节奏，多打车", startDate="2026-11-22", transport="打车 / 驾车", lodging="")
         route = AsyncMock(return_value={"minutes": 18, "minutesMin": None, "minutesMax": None, "distanceMeters": 3000, "source": "高德地图路线规划", "polyline": []})
         progress = AsyncMock()
-        with patch("app.itinerary_doc.settings.amap_web_service_key", "test"), patch("app.itinerary_doc.search_places", new=AsyncMock(return_value=(candidates, "高德地图 POI"))), patch("app.itinerary_doc._model", new=AsyncMock(return_value="[]")), patch("app.itinerary_doc.calculate_route", new=route):
+        with patch("app.itinerary_doc.collect_opening_hours", new=AsyncMock(return_value={})), patch("app.itinerary_doc.settings.amap_web_service_key", "test"), patch("app.itinerary_doc.search_places", new=AsyncMock(return_value=(candidates, "高德地图 POI"))), patch("app.itinerary_doc._model", new=AsyncMock(return_value="[]")), patch("app.itinerary_doc.calculate_route", new=route):
             result = await build_itinerary(request, progress=progress)
         self.assertEqual(progress.await_args_list[0].args[0], 5)
         self.assertEqual(progress.await_args_list[-1].args[0], 97)
@@ -49,7 +49,7 @@ class ItineraryDocumentTest(unittest.IsolatedAsyncioTestCase):
             lodging="已选酒店", lodgingLocation=lodging_point,
         )
         route = AsyncMock(return_value={"minutes": 10, "minutesMin": None, "minutesMax": None, "distanceMeters": 1300, "source": "高德地图路线规划", "polyline": []})
-        with patch("app.itinerary_doc.settings.amap_web_service_key", "test"), patch("app.itinerary_doc.search_places", new=AsyncMock(return_value=([], "高德 POI"))), patch("app.itinerary_doc._model", new=AsyncMock(return_value=None)), patch("app.itinerary_doc.calculate_route", new=route), patch("app.itinerary_doc._lodging_point", new=AsyncMock(side_effect=AssertionError("应复用地图坐标"))):
+        with patch("app.itinerary_doc.collect_opening_hours", new=AsyncMock(return_value={})), patch("app.itinerary_doc.settings.amap_web_service_key", "test"), patch("app.itinerary_doc.search_places", new=AsyncMock(return_value=([], "高德 POI"))), patch("app.itinerary_doc._model", new=AsyncMock(return_value=None)), patch("app.itinerary_doc.calculate_route", new=route), patch("app.itinerary_doc._lodging_point", new=AsyncMock(side_effect=AssertionError("应复用地图坐标"))):
             result = await build_itinerary(request)
         self.assertEqual(len(result["dayPlans"]), 1)
         self.assertEqual(result["dayPlans"][0]["stops"][0]["place"]["name"], "黄鹤楼")

@@ -25,6 +25,7 @@ from .map_places import MapPlaceInput
 from .places import FEATURED, calculate_route, place_details, search_places
 from .planner import plan
 from .itinerary_doc import build_itinerary
+from .requirements_extract import extract_required_places
 from .place_info import get_place_info
 from .request_context import request_id
 
@@ -110,6 +111,15 @@ async def amap_js_proxy(path: str, request: Request):
 @app.get("/api/health")
 def health():
     return {"ok": True, "amapConfigured": bool(settings.amap_web_service_key), "modelConfigured": bool(settings.deepseek_api_key if settings.ai_provider == "deepseek" else settings.openai_api_key)}
+
+
+class MustVisitExtractionRequest(BaseModel):
+    requirements: str = Field(max_length=1000)
+
+
+@app.post("/api/preferences/extract-must-visit")
+async def extract_must_visit(request: MustVisitExtractionRequest):
+    return await extract_required_places(request.requirements)
 
 
 @app.get("/api/places/featured")

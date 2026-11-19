@@ -264,7 +264,7 @@ export function Wizard({ onBack, onFinish }: Props) {
           {step === 4 && (
             <div className="field-stack">
               <label>
-                个性化要求 <span>选填</span>
+                特殊信息 / 个性化要求 <span>选填</span>
                 <textarea
                   rows={7}
                   value={value.requirements}
@@ -274,7 +274,7 @@ export function Wizard({ onBack, onFinish }: Props) {
                 />
               </label>
               <div className="form-hint">
-                固定时间、开放与预约信息需要出行前核实。规划结果会明确标注待核实内容。
+                进入旅行后，AI 会自动识别明确要求的必去景点并加入列表；夜间等时间偏好也会用于行程规划。实际开放时间需要核实。
               </div>
             </div>
           )}
