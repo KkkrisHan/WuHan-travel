@@ -6,6 +6,7 @@ import json
 import math
 import re
 from datetime import date, datetime, timedelta
+from typing import Awaitable, Callable
 from uuid import uuid4
 
 import httpx
@@ -60,7 +61,12 @@ async def _lodging_point(name: str) -> Point:
         raise HTTPException(422, "无法定位住宿地点，请输入更完整的武汉酒店名称或地址") from exc
 
 
-async def build_itinerary(request) -> dict:
+async def build_itinerary(request, progress: Callable[[int, str], Awaitable[None]] | None = None) -> dict:
+    async def report(percent: int, label: str) -> None:
+        if progress:
+            await progress(percent, label)
+
+    await report(5, "校验旅行设置")
     if not settings.amap_web_service_key:
         raise HTTPException(503, "未配置高德 Web 服务密钥，无法核实推荐地点")
     try:
@@ -74,6 +80,7 @@ async def build_itinerary(request) -> dict:
     if required:
         queries.append(required[0].name + " 附近 景点")
     pool: list[Place] = []
+    await report(15, "查询真实景点与地理位置")
     search_results = await asyncio.gather(*(search_places(query) for query in queries), return_exceptions=True)
     for result in search_results:
         if not isinstance(result, BaseException):
@@ -95,6 +102,7 @@ async def build_itinerary(request) -> dict:
             unique.append(place)
     anchors = [p.location for p in required] or [Point(lng=114.3055, lat=30.5928)]
     unique.sort(key=lambda p: min(_meters(p.location, anchor) for anchor in anchors))
+    await report(34, f"已查询 {len(pool)} 个地点，筛选候选景点")
     # AI ranks a bounded set of real POIs; unrecognized IDs are discarded.
     preference = await _model(
         '你是武汉行程顾问。从提供的真实高德 POI 中选择适合要求和地理邻近性的地点，只返回 JSON 数组，元素为 placeId，不得创造地点。最多选指定数量。',
@@ -102,6 +110,7 @@ async def build_itinerary(request) -> dict:
                     "mustVisit": [p.name for p in required], "count": max(request.days*2-len(required), request.days),
                     "candidates": [{"placeId": p.placeId, "name": p.name, "category": p.category, "lng": p.location.lng, "lat": p.location.lat} for p in unique[:25]]}, ensure_ascii=False),
     ) if unique else None
+    await report(48, "结合旅行偏好挑选景点")
     preferred_ids: list[str] = []
     if preference:
         try:
@@ -183,6 +192,7 @@ async def build_itinerary(request) -> dict:
         day_places = ordered_groups
     if any(not items for items in day_places):
         raise HTTPException(502, "行程分天失败")
+    await report(60, "已完成行程分天，准备交通规划")
     lodging = request.lodging.strip() if request.lodging else ""
     lodging_point = getattr(request, "lodgingLocation", None) or (await _lodging_point(lodging) if lodging else None)
     lines = [f"# 武汉{request.days}日旅行计划", "", "## 旅行概览", "",
@@ -195,6 +205,7 @@ async def build_itinerary(request) -> dict:
     route_sources: set[str] = set()
     structured_days: list[dict] = []
     for day_index, items in enumerate(day_places):
+        await report(62 + round(day_index / request.days * 31), f"规划第 {day_index + 1}/{request.days} 天路线")
         day_date = (first_date + timedelta(days=day_index)).isoformat() if first_date else f"第{day_index+1}天（日期未定）"
         lines += [f"## Day {day_index+1} · {day_date}", "", f"### 当日主题：{items[0].category}与邻近区域", "",
                   "| 时段 | 地点与类别 | 安排 | 交通 |", "| --- | --- | --- | --- |"]
@@ -246,10 +257,12 @@ async def build_itinerary(request) -> dict:
         lines += ["", "### 当日路线", "", " → ".join(p.name for p in items) + "。地点按地理邻近性排序，跨江或拥堵时请以当日导航为准。", "",
                   "### 注意事项", "", "- 各地点开放、票价与预约信息请在出发前查看地点详情的来源和核查时间。",
                   "- 交通时间为高德规划值或标明区间的距离估算；实际打车等待、路况和排队需另留弹性。", ""]
+        await report(62 + round((day_index + 1) / request.days * 31), f"第 {day_index + 1} 天路线已完成")
         structured_days.append(DayPlan(id=uuid4().hex, date=day_date, stops=day_stops, legs=day_legs, transportMinutes=day_transport_minutes, sightseeingMinutes=sum(stop.minutes for stop in day_stops), meals=["午餐与休息"], budgetNote="费用以当天官方票价与实际交通支出为准", warnings=["地点开放、预约和交通时间请在出发前核实。"]).model_dump())
     missing = [p.name for p in required if p.placeId not in seen_ids]
     if missing or len(day_places) != request.days or any(not day for day in day_places):
         raise HTTPException(502, "行程完整性校验失败：" + "、".join(missing))
+    await report(97, "核对全部必去地点并整理行程")
     lines += ["## 行程结束与核查清单", "", "- 出发前再次确认景区当天公告、预约入口与票价。", "- 高峰期给餐饮、打车与过江交通预留额外时间。", ""]
     return {"title": f"武汉{request.days}日旅行计划", "markdown": "\n".join(lines),
             "recommendedPlaces": [p.model_dump() for p in recommendations], "routeSource": "；".join(sorted(route_sources)),

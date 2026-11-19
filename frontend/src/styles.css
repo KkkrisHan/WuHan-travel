@@ -2470,3 +2470,60 @@ textarea:focus-visible,
 .generator-summary span { font-size:11px; color:#99b2b7; }
 .generator-summary strong { font-size:13px; overflow-wrap:anywhere; color:#e8f7f7; }
 @media(max-width:560px) { .generator-summary {grid-template-columns:1fr;} .hotel-picker-map {height:220px;} }
+
+/* Compact, genuinely streaming assistant messages */
+.message-scroller {position:relative;display:flex;flex:1;min-height:0;}
+.message-scroller .message-list {height:100%;flex:1;min-height:0;overscroll-behavior:contain;}
+.message-text.markdown-content {margin:0;max-width:none;white-space:normal;font-size:12px;line-height:1.6;}
+.message-text.markdown-content > :first-child {margin-top:0;}
+.message-text.markdown-content > :last-child {margin-bottom:0;}
+.message-text.markdown-content p {margin:0 0 .48em;}
+.message-text.markdown-content p + p {margin-top:.16em;}
+.message-text.markdown-content ul,.message-text.markdown-content ol {margin:.25em 0 .65em;padding-left:1.7em;}
+.message-text.markdown-content li {margin:.1em 0;padding:0;}
+.message-text.markdown-content li p {margin:.1em 0;}
+.message-text.markdown-content h1,.message-text.markdown-content h2,.message-text.markdown-content h3 {margin:.8em 0 .3em;font-size:1.12em;line-height:1.5;}
+.message-text.markdown-content blockquote {margin:.45em 0;padding:.4em .75em;}
+.message-text.markdown-content table {margin:.5em 0;}
+.message-code-block {margin:.55em 0;overflow:auto;white-space:normal;}
+.message-code-block code {display:block;padding:10px 12px;overflow-x:auto;border-radius:6px;background:#0b171e;color:#cce5e4;font-size:11px;white-space:pre-wrap;}
+.message-code-block .assistant-travel-card {white-space:normal;}
+.message-jump-bottom {position:absolute;z-index:7;right:19px;bottom:13px;display:grid;place-items:center;width:38px;height:38px;border:1px solid #548b8d;border-radius:50%;background:#1e3f46;color:#b8f5e9;box-shadow:0 6px 18px #0008;cursor:pointer;}
+.message-jump-bottom:hover {background:#2a565a;border-color:#a1e3d8;}
+.assistant-travel-card {display:flex;flex-direction:column;gap:7px;margin:.45em 0;padding:14px 15px;border:1px solid #3e696d;border-radius:10px;background:linear-gradient(145deg,#17383e,#142830);white-space:normal;box-shadow:0 6px 18px #0002;}
+.assistant-travel-card-kicker {display:flex;align-items:center;gap:5px;color:#87dacc;font-size:11px;font-weight:600;}
+.assistant-travel-card>strong {color:#f4ffff;font-size:15px;}
+.assistant-travel-card>p {margin:0!important;color:#cadfdf;font-size:12px;line-height:1.6;}
+.assistant-travel-card-tip {padding:7px 9px;border-left:2px solid #7ed7c5;background:#24515b55;color:#a8d4d0;font-size:11px;}
+.assistant-travel-card>a {display:flex;align-items:center;gap:6px;align-self:flex-start;color:#92e9d9!important;font-size:11px;text-decoration:none;}
+
+/* Generation progress follows verified backend stages (not a simulated timer) */
+.generate-progress {display:flex;flex-direction:column;gap:8px;margin:16px 0;padding:12px 14px;border-radius:9px;border:1px solid #335e64;background:#102a31;}
+.generate-progress-head {display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;color:#c9ece7;}
+.generate-progress-head strong {font-size:12px;font-weight:600;}
+.generate-progress-head span {color:#8be2d4;font-variant-numeric:tabular-nums;}
+.generate-progress progress {display:block;width:100%;height:10px;overflow:hidden;border:0;border-radius:99px;appearance:none;background:#2a4247;}
+.generate-progress progress::-webkit-progress-bar {background:#2a4247;border-radius:99px;}
+.generate-progress progress::-webkit-progress-value {border-radius:99px;background:linear-gradient(90deg,#37aeb6,#83ead3);transition:width .22s ease;}
+.generate-progress progress::-moz-progress-bar {background:#60d7cf;border-radius:99px;}
+.generate-progress small {font-size:10px;line-height:1.5;color:#89a8ac;}
+
+/* Zoom-sensitive route sequence overlays and revisited-place drawer */
+.route-sequence-pin {display:flex;align-items:center;justify-content:center;gap:3px;min-width:34px;height:34px;padding:0 8px;border:2px solid #fff;border-radius:30px;background:var(--route-color,#ee835b);color:#fff;font-size:13px;font-weight:800;line-height:1;box-shadow:0 2px 10px #0008;white-space:nowrap;cursor:pointer;user-select:none;}
+.route-sequence-pin.cluster {min-width:65px;background:#233d55;border-color:var(--route-color,#ee835b);font-size:12px;box-shadow:0 0 0 3px #1e4c58aa,0 4px 15px #0008;}
+.route-sequence-pin b {font-size:10px;color:#a8d9e2;}
+.route-cluster-drawer {position:absolute;top:104px;right:16px;z-index:12;width:min(310px,calc(100% - 32px));max-height:min(390px,60%);overflow:auto;padding:13px;border:1px solid #46757b;border-radius:11px;background:#13252ded;color:#f0ffff;box-shadow:0 12px 32px #0008;backdrop-filter:blur(10px);}
+.route-cluster-drawer-head {display:flex;justify-content:space-between;align-items:center;gap:8px;}
+.route-cluster-drawer-head strong {font-size:13px;}
+.route-cluster-drawer-head button {border:0;background:none;color:#d8eff0;cursor:pointer;}
+.route-cluster-drawer>p {font-size:11px;color:#a7c5c8;line-height:1.5;margin:9px 0;}
+.route-cluster-items {display:flex;flex-direction:column;gap:5px;}
+.route-cluster-items>button {display:flex;align-items:center;gap:9px;width:100%;padding:8px;border:1px solid #3e5e64;border-radius:7px;background:#203740;color:white;text-align:left;cursor:pointer;}
+.route-cluster-items>button:hover {background:#2a535b;}
+.route-cluster-items>button>span {display:grid;place-items:center;flex:none;width:26px;height:26px;border-radius:50%;background:#e98766;color:#fff;font-size:12px;font-weight:800;}
+.route-cluster-items>button>div {display:flex;flex-direction:column;gap:3px;min-width:0;}
+.route-cluster-items>button strong {font-size:12px;}
+.route-cluster-items>button small {font-size:10px;color:#abc7cb;}
+.document-actions .route-connect-button {display:flex;align-items:center;gap:7px;margin-right:auto;border-color:#508e8b;color:#aceee7;}
+.document-actions .route-connect-button.active {background:#27676c;color:#f2ffff;border-color:#8de5d8;}
+.route-map-note {display:block;max-width:260px;margin-left:6px;color:#4f777e;font-size:9px;font-weight:400;line-height:1.3;}

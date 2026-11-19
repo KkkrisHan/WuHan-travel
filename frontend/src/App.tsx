@@ -36,6 +36,7 @@ import {
 } from "./lib/db";
 import { exportTrip } from "./lib/export";
 import { recoverItinerary } from "./lib/itinerary";
+import { generateItineraryWithProgress } from "./lib/itineraryStream";
 import type {
   Candidate,
   Message,
@@ -85,8 +86,10 @@ function App() {
   const [featured, setFeatured] = useState<Place[]>([]);
   const [selected, setSelected] = useState<Place | null>(null);
   const [rightTab, setRightTab] = useState("assistant");
+  const [routeDocumentId, setRouteDocumentId] = useState<string | null>(null);
   const [generateOpen, setGenerateOpen] = useState(false);
   const [generateBusy, setGenerateBusy] = useState(false);
+  const [generateProgress, setGenerateProgress] = useState({ percent: 0, label: "准备生成行程" });
   const [generateError, setGenerateError] = useState("");
   const [specialRequirements, setSpecialRequirements] = useState("");
   const [candidates, setCandidates] = useState<Candidate[]>([]);
@@ -197,6 +200,7 @@ function App() {
     setActiveDay(0);
     setShowAll(false);
     setRightTab("assistant");
+    setRouteDocumentId(null);
     setPage("workspace");
   };
   const backToDashboard = () => {
@@ -239,15 +243,11 @@ function App() {
       if (!draft.pendingPlaces.some((item) => item.placeId === place.placeId))
         draft.pendingPlaces.push(place);
     });
-  const savePlace = (place: Place) =>
-    change(`收藏${place.name}`, (draft) => {
-      if (!draft.savedPlaces.some((item) => item.placeId === place.placeId))
-        draft.savedPlaces.push(place);
-    });
   const openGenerator = () => {
     if (!trip) return;
     setSpecialRequirements(trip.preferences.requirements || "");
     setGenerateError("");
+    setGenerateProgress({ percent: 0, label: "准备生成行程" });
     setGenerateOpen(true);
   };
   const generateDocument = async (event: React.FormEvent) => {
@@ -260,6 +260,7 @@ function App() {
     }
     setGenerateBusy(true);
     setGenerateError("");
+    setGenerateProgress({ percent: 0, label: "正在连接行程规划服务" });
     try {
       const requirements = [
         prefs.company ? `同行类型：${prefs.company}` : "",
@@ -267,7 +268,7 @@ function App() {
         prefs.interests.length ? `兴趣：${prefs.interests.join("、")}` : "",
         specialRequirements.trim(),
       ].filter(Boolean).join("\n");
-      const generated = await api.generateItinerary({
+      const generated = await generateItineraryWithProgress({
         mustVisitPlaces: trip.pendingPlaces,
         people: prefs.people,
         days: prefs.days,
@@ -276,7 +277,7 @@ function App() {
         transport: prefs.transport,
         lodging: prefs.lodging || "",
         lodgingLocation: prefs.lodgingLocation || null,
-      });
+      }, (percent, label) => setGenerateProgress({ percent, label }));
       if (generated.dayPlans.length !== prefs.days || generated.dayPlans.some((day) => !day.stops.length))
         throw new Error("服务端返回的日程不完整，未保存，请重试。");
       const document = {
@@ -298,6 +299,7 @@ function App() {
       setActiveDay(0);
       setShowAll(false);
       setRightTab(document.id);
+      setRouteDocumentId(null);
       setGenerateOpen(false);
     } catch (error) {
       setGenerateError(error instanceof Error ? error.message : "行程生成失败");
@@ -682,6 +684,16 @@ function App() {
         ? [routeSourceDays[activeDay]]
         : [];
   }, [routeSourceDays, activeDay, showAll]);
+  const routeDocumentData = JSON.stringify(
+    routeDocumentId
+      ? (trip?.generatedItineraries || []).find((doc) => doc.id === routeDocumentId) || null
+      : null,
+  );
+  const connectedRouteDays = useMemo(() => {
+    if (!routeDocumentData || routeDocumentData === "null") return routeDays;
+    const document = JSON.parse(routeDocumentData) as GeneratedItinerary;
+    return recoverItinerary(document);
+  }, [routeDocumentData, routeDays]);
   const selectPlace = (place: Place | null) => {
     setSelected(place);
     if (!place) return;
@@ -828,11 +840,13 @@ function App() {
           selected={selected}
           onSelect={selectPlace}
           onAddPending={addPending}
-          onSave={savePlace}
           onIntro={introPlace}
-          routeDays={routeDays}
+          routeDays={connectedRouteDays}
+          routeFocus={!!routeDocumentId}
           routeLabel={
-            selectedCandidate
+            routeDocumentId
+              ? "行程路线 · 全部天数"
+              : selectedCandidate
               ? `预览 · ${selectedCandidate.title}`
               : routeDays.length
                 ? showAll
@@ -894,7 +908,7 @@ function App() {
               onRetry={retryMessage}
               onIntro={introPlace}
             />
-          ) : rightTab === "must-visit" ? <MustVisitPanel places={trip.pendingPlaces} onSelect={selectPlace} onRemove={(place) => change(`移除必去地点${place.name}`, draft => { draft.pendingPlaces = draft.pendingPlaces.filter(item => item.placeId !== place.placeId); })} onGenerate={openGenerator} /> : <GeneratedDocument document={(trip.generatedItineraries || []).find(item => item.id === rightTab)} />}
+          ) : rightTab === "must-visit" ? <MustVisitPanel places={trip.pendingPlaces} onSelect={selectPlace} onRemove={(place) => change(`移除必去地点${place.name}`, draft => { draft.pendingPlaces = draft.pendingPlaces.filter(item => item.placeId !== place.placeId); })} onGenerate={openGenerator} /> : <GeneratedDocument document={(trip.generatedItineraries || []).find(item => item.id === rightTab)} routeActive={routeDocumentId === rightTab} onToggleRoute={() => setRouteDocumentId(current => current === rightTab ? null : rightTab)} />}
         </aside>
       </div>
       <div className="mobile-nav">
@@ -945,6 +959,13 @@ function App() {
               <textarea value={specialRequirements} onChange={(e) => setSpecialRequirements(e.target.value)} rows={3} placeholder="例如：周六下午有固定活动，优先安排附近景点" maxLength={1000} />
             </label>
             <p>必去景点 {trip.pendingPlaces.length} 个 · 生成后自动保存为当前行程并显示路线。</p>
+            {(generateBusy || generateProgress.percent > 0) && (
+              <div className="generate-progress" role="status" aria-live="polite">
+                <div className="generate-progress-head"><strong>{generateProgress.label}</strong><span>{generateProgress.percent}%</span></div>
+                <progress aria-label="行程生成阶段进度" max={100} value={generateProgress.percent} />
+                <small>根据景点搜索、偏好筛选与逐日路线计算的阶段性进度更新；复杂路线可能耗时较长。</small>
+              </div>
+            )}
             {generateError && <div role="alert">{generateError}</div>}
             <button type="button" disabled={generateBusy} onClick={() => setGenerateOpen(false)}>取消</button>
             <button className="button primary" disabled={generateBusy}>{generateBusy ? "正在生成行程…" : "生成当前行程"}</button>
@@ -955,7 +976,7 @@ function App() {
   );
 }
 
-function GeneratedDocument({document}: {document?: GeneratedItinerary}) {
+function GeneratedDocument({document,routeActive,onToggleRoute}: {document?: GeneratedItinerary;routeActive:boolean;onToggleRoute:()=>void}) {
   if (!document) return null;
   const exportPdf = async () => {
     const popup = window.open("", "_blank");
@@ -973,7 +994,7 @@ function GeneratedDocument({document}: {document?: GeneratedItinerary}) {
     popup.focus(); popup.print();
   };
   const exportMarkdown = () => { const url = URL.createObjectURL(new Blob([document.markdown], {type:"text/markdown;charset=utf-8"})); const link = Object.assign(window.document.createElement("a"), {href:url, download:`${document.title}.md`}); link.click(); URL.revokeObjectURL(url); };
-  return <article className="generated-document"><div className="document-actions"><button onClick={exportMarkdown}>导出 Markdown</button><button onClick={exportPdf}>导出 PDF</button></div><div className="markdown-content"><ReactMarkdown remarkPlugins={[remarkGfm]}>{document.markdown}</ReactMarkdown></div></article>;
+  return <article className="generated-document"><div className="document-actions"><button className={`route-connect-button ${routeActive ? "active" : ""}`} aria-pressed={routeActive} onClick={onToggleRoute}><IconRoute size={16}/>{routeActive ? "关闭路线连线" : "路线连线"}</button><button onClick={exportMarkdown}>导出 Markdown</button><button onClick={exportPdf}>导出 PDF</button></div><div className="markdown-content"><ReactMarkdown remarkPlugins={[remarkGfm]}>{document.markdown}</ReactMarkdown></div></article>;
 }
 
 export default App;

@@ -4,7 +4,6 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   IconArrowUpRight,
-  IconBookmark,
   IconCheck,
   IconCompass,
   IconMapPin,
@@ -17,6 +16,7 @@ import {
 import { api, personalPlaceKey, personalPlaceToPlace, type PersonalMapPlace, type PlaceInfo } from "../lib/api";
 import { createMapExplorer } from "../lib/mapExplorer";
 import type { DayPlan, Place, Trip } from "../types";
+import { clusterRouteStops, ROUTE_DAY_COLORS, sequenceStops, type RouteSequenceStop } from "../lib/routeClusters";
 
 type Props = {
   trip: Trip;
@@ -24,9 +24,9 @@ type Props = {
   selected: Place | null;
   onSelect: (place: Place | null) => void;
   onAddPending: (place: Place) => void;
-  onSave: (place: Place) => void;
   onIntro: (place: Place) => void;
   routeDays: DayPlan[];
+  routeFocus: boolean;
   routeLabel: string;
   onMapError: (message: string) => void;
 };
@@ -41,6 +41,8 @@ type MapControl = {
   addControl: (control: unknown) => void;
   remove: (items: unknown[]) => void;
   resize: () => void;
+  lngLatToContainer: (point: unknown) => { x: number; y: number };
+  setFitView: (targets?: unknown[], immediately?: boolean, padding?: number[]) => void;
 };
 type MapEvent = { id?: string; name?: string; lnglat?: { lng: number; lat: number } };
 type Discovery = { places: Place[]; note: string };
@@ -52,6 +54,7 @@ function MapCanvas({
   selected,
   onSelect,
   routeDays,
+  routeFocus,
   statusById,
   onError,
   onDiscoverStart,
@@ -61,6 +64,7 @@ function MapCanvas({
   selected: Place | null;
   onSelect: (place: Place) => void;
   routeDays: DayPlan[];
+  routeFocus: boolean;
   statusById: Record<string, PlaceStatus>;
   onError: (message: string) => void;
   onDiscoverStart: () => void;
@@ -71,6 +75,8 @@ function MapCanvas({
   const mapRef = useRef<MapControl | null>(null);
   const amapRef = useRef<Awaited<ReturnType<typeof load>> | null>(null);
   const overlays = useRef<unknown[]>([]);
+  const routeOverlays = useRef<unknown[]>([]);
+  const [drawerItems, setDrawerItems] = useState<RouteSequenceStop[]>([]);
   const selectRef = useRef(onSelect);
   const startRef = useRef(onDiscoverStart);
   const resultRef = useRef(onDiscoverResult);
@@ -175,7 +181,9 @@ function MapCanvas({
     if (!map || !AMap) return;
     if (overlays.current.length) map.remove(overlays.current);
     const next: unknown[] = [];
+    const routeIds = routeFocus ? new Set(routeDays.flatMap((day) => day.stops.map((stop) => stop.place.placeId))) : new Set<string>();
     places.forEach((place) => {
+      if (routeIds.has(place.placeId)) return;
       const inRoute = routeDays.some((day) =>
         day.stops.some((stop) => stop.place.placeId === place.placeId),
       );
@@ -194,7 +202,7 @@ function MapCanvas({
       });
       next.push(marker);
     });
-    routeDays.forEach((day) => {
+    if (!routeFocus) routeDays.forEach((day) => {
       day.legs.forEach((leg) => {
         const points = leg.polyline.map((point) => [point.lng, point.lat]);
         if (points.length > 1)
@@ -212,7 +220,108 @@ function MapCanvas({
     });
     map.add(next);
     overlays.current = next;
-  }, [places, routeDays, selected, statusById, ready]);
+  }, [places, routeDays, routeFocus, selected, statusById, ready]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const AMap = amapRef.current;
+    if (!ready || !map || !AMap) return;
+    const stops = sequenceStops(routeDays);
+    let fitMarkers: unknown[] = [];
+
+    const drawRoute = () => {
+      if (routeOverlays.current.length) map.remove(routeOverlays.current);
+      routeOverlays.current = [];
+      fitMarkers = [];
+      if (!routeFocus || !stops.length) return;
+
+      const overlaysForRoute: unknown[] = [];
+      for (const [dayIndex, day] of routeDays.entries()) {
+        const color = ROUTE_DAY_COLORS[dayIndex % ROUTE_DAY_COLORS.length];
+        for (let index = 0; index < day.stops.length - 1; index++) {
+          const current = day.stops[index];
+          const next = day.stops[index + 1];
+          const leg = day.legs.find((item) => item.fromStopId === current.id && item.toStopId === next.id);
+          // Use the real road polyline when available; otherwise draw a clearly labelled schematic.
+          const path = leg?.polyline && leg.polyline.length > 1
+            ? leg.polyline.map((point) => [point.lng, point.lat])
+            : [[current.place.location.lng, current.place.location.lat], [next.place.location.lng, next.place.location.lat]];
+          if (path.every((point) => point[0] === path[0][0] && point[1] === path[0][1])) continue;
+          overlaysForRoute.push(new AMap.Polyline({
+            path, strokeColor: color, strokeWeight: 5, strokeOpacity: 0.87,
+            showDir: true, dirColor: "#ffffff", lineJoin: "round", zIndex: 105,
+            extData: { schematic: !leg?.polyline || leg.polyline.length < 2 },
+          }));
+        }
+      }
+      const groups = clusterRouteStops(
+        stops,
+        (point) => {
+          const pixel = map.lngLatToContainer(new AMap.LngLat(point.lng, point.lat));
+          return { x: pixel.x, y: pixel.y };
+        },
+        41,
+      );
+      for (const group of groups) {
+        const orders = group.items.map((item) => item.order);
+        const label = group.items.length > 1
+          ? (orders.length <= 3 ? orders.join("·") : `${orders.slice(0, 2).join("·")} +${orders.length - 2}`)
+          : String(orders[0]);
+        const cluster = group.items.length > 1;
+        const color = ROUTE_DAY_COLORS[(group.items[0].day - 1) % ROUTE_DAY_COLORS.length];
+        const content = document.createElement("div");
+        content.className = `route-sequence-pin ${cluster ? "cluster" : ""}`;
+        content.style.setProperty("--route-color", color);
+        const number = document.createElement("span");
+        number.textContent = label;
+        content.appendChild(number);
+        if (cluster) {
+          const arrow = document.createElement("b");
+          arrow.textContent = "▾";
+          content.appendChild(arrow);
+        }
+        const activate = () => {
+          requestId.current++;
+          suppressUntil.current = Date.now() + 500;
+          if (clickTimer.current !== null) window.clearTimeout(clickTimer.current);
+          clickTimer.current = null;
+          if (cluster) setDrawerItems(group.items);
+          else selectRef.current(group.items[0].place);
+        };
+        content.addEventListener("click", (event) => {
+          event.stopPropagation();
+          activate();
+        });
+        const marker = new AMap.Marker({
+          position: [group.location.lng, group.location.lat],
+          title: cluster ? `合并 ${group.items.length} 次行程停靠，点击展开顺序` : `第 ${orders[0]} 站：${group.items[0].place.name}`,
+          content,
+          offset: new AMap.Pixel(cluster ? -33 : -17, -18),
+          zIndex: 160,
+        });
+        marker.on("click", activate);
+        fitMarkers.push(marker);
+        overlaysForRoute.push(marker);
+      }
+      map.add(overlaysForRoute);
+      routeOverlays.current = overlaysForRoute;
+    };
+
+    drawRoute();
+    if (routeFocus && fitMarkers.length) {
+      map.setFitView(fitMarkers, false, [86, 75, 85, 75]);
+    }
+    const update = () => drawRoute();
+    map.on("zoomend", update);
+    map.on("moveend", update);
+    return () => {
+      map.off("zoomend", update);
+      map.off("moveend", update);
+      if (routeOverlays.current.length) map.remove(routeOverlays.current);
+      routeOverlays.current = [];
+    };
+  }, [ready, routeFocus, routeDays]);
+
   useEffect(() => {
     if (selected && mapRef.current) {
       mapRef.current.setCenter([selected.location.lng, selected.location.lat]);
@@ -288,7 +397,16 @@ function MapCanvas({
     );
   }
   return (
-    <div ref={element} className="amap-canvas" aria-label="武汉高德地图" />
+    <>
+      <div ref={element} className="amap-canvas" aria-label="武汉高德地图" />
+      {routeFocus && drawerItems.length > 1 && (
+        <div className="route-cluster-drawer" role="group" aria-label="合并的行程地点">
+          <div className="route-cluster-drawer-head"><strong>合并站点 · {drawerItems.length} 次停靠</strong><button type="button" onClick={() => setDrawerItems([])} aria-label="关闭站点抽屉"><IconX size={16}/></button></div>
+          <p>当前缩放下的多个标记重叠。以下保留每一次经过的顺序，放大地图可拆分标记。</p>
+          <div className="route-cluster-items">{drawerItems.map((item) => <button type="button" key={`${item.order}-${item.stopId}`} onClick={() => { selectRef.current(item.place); setDrawerItems([]); }}><span>{item.order}</span><div><strong>{item.place.name}</strong><small>第 {item.day} 天 · 第 {item.order} 站</small></div></button>)}</div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -298,9 +416,9 @@ export function MapWorkspace({
   selected,
   onSelect,
   onAddPending,
-  onSave,
   onIntro,
   routeDays,
+  routeFocus,
   routeLabel,
   onMapError,
 }: Props) {
@@ -478,9 +596,6 @@ export function MapWorkspace({
   const isPending =
     selected &&
     trip.pendingPlaces.some((place) => place.placeId === selected.placeId);
-  const isSaved =
-    selected &&
-    trip.savedPlaces.some((place) => place.placeId === selected.placeId);
   const personalSaved = selected && personalPlaces.find((item) => item.place_key === personalPlaceKey(selected));
   return (
     <section className="map-workspace" aria-label="地图与地点搜索">
@@ -489,6 +604,7 @@ export function MapWorkspace({
         selected={selected}
         onSelect={select}
         routeDays={routeDays}
+        routeFocus={routeFocus}
         statusById={statusById}
         onError={onMapError}
         onDiscoverStart={() => {
@@ -559,6 +675,7 @@ export function MapWorkspace({
       <div className="map-route-chip">
         <span className="route-indicator" />
         {routeLabel}
+        {routeFocus && <small className="route-map-note">箭头表示游览顺序；无导航路径时以直线示意</small>}
       </div>
       <div className="map-legend" aria-label="地图地点图例">
         <span>
@@ -658,7 +775,7 @@ export function MapWorkspace({
               disabled={personalLoading || personalBusy || !!personalError}
               onClick={() => togglePersonal(selected)}
             >
-              {personalBusy ? "处理中…" : personalSaved ? "取消标记" : "添加到我的地图"}
+              {personalBusy ? "处理中…" : personalSaved ? "取消标记" : "标记"}
             </button>
             <button
               className="button primary"
@@ -667,14 +784,6 @@ export function MapWorkspace({
             >
               {isPending ? <IconCheck size={17} /> : <IconPlus size={17} />}
               {isPending ? "已加入必去景点" : "加入必去景点"}
-            </button>
-            <button
-              className="button secondary"
-              disabled={!!isSaved}
-              onClick={() => onSave(selected)}
-            >
-              {isSaved ? <IconCheck size={17} /> : <IconBookmark size={17} />}
-              {isSaved ? "已收藏" : "收藏"}
             </button>
             <button className="button ghost" onClick={() => onIntro(selected)}>
               <IconSparkles size={17} />

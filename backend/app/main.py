@@ -197,6 +197,48 @@ async def generate_itinerary(request: ItineraryRequest):
     return await build_itinerary(request)
 
 
+@app.post("/api/itineraries/generate/stream")
+async def generate_itinerary_stream(request: ItineraryRequest):
+    if not (settings.deepseek_api_key if settings.ai_provider == "deepseek" else settings.openai_api_key):
+        raise HTTPException(503, "未配置当前 AI Provider 的 API Key")
+
+    async def events():
+        queue: asyncio.Queue[dict] = asyncio.Queue()
+        async def progress(percent: int, label: str):
+            await queue.put({"type": "progress", "percent": percent, "label": label})
+
+        async def worker():
+            try:
+                result = await build_itinerary(request, progress=progress)
+                await queue.put({"type": "complete", "percent": 100, "label": "行程生成完成", "result": result})
+            except HTTPException as exc:
+                await queue.put({"type": "error", "detail": str(exc.detail)})
+            except Exception:
+                logger.exception("itinerary stream failed")
+                await queue.put({"type": "error", "detail": "行程生成失败，请稍后重试"})
+
+        job = asyncio.create_task(worker())
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=10)
+                except asyncio.TimeoutError:
+                    yield json.dumps({"type": "heartbeat"}, ensure_ascii=False) + "\n"
+                    continue
+                yield json.dumps(event, ensure_ascii=False) + "\n"
+                if event["type"] in ("complete", "error"):
+                    break
+        finally:
+            if not job.done():
+                job.cancel()
+
+    return StreamingResponse(
+        events(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.post("/api/routes/calculate")
 async def route_calculate(request: RouteRequest):
     return await calculate_route(request.origin, request.destination, request.mode)
@@ -221,16 +263,37 @@ async def place_intro(request: IntroRequest):
 @app.post("/api/chat")
 async def chat_task(request: ChatRequest):
     async def worker(emit):
-        result = await chat_graph.ainvoke({"snapshot": request.snapshot, "message": request.message, "locked": request.snapshot.tripId in tasks.TRIP_LOCKS})
+        pending = ""
+        last_emit = time.monotonic()
+        streamed = False
+
+        async def on_delta(piece: str):
+            nonlocal pending, last_emit, streamed
+            streamed = True
+            pending += piece
+            now = time.monotonic()
+            if len(pending) >= 24 or now - last_emit >= 0.09:
+                await emit("message_delta", {"text": pending})
+                pending = ""
+                last_emit = now
+
+        result = await chat_graph.ainvoke({
+            "snapshot": request.snapshot,
+            "message": request.message,
+            "locked": request.snapshot.tripId in tasks.TRIP_LOCKS,
+            "on_delta": on_delta,
+        })
+        if pending:
+            await emit("message_delta", {"text": pending})
         patch = result.get("patch")
         if patch:
-            await emit("tool_started", {"label": "校验简单行程修改"})
-            await emit("tool_completed", {"label": "修改提案已生成，等待浏览器 revision 校验"})
+            await emit("tool_started", {"label": "校验行程修改"})
+            await emit("tool_completed", {"label": "修改提案已生成"})
             return {"text": result["answer"], "patch": patch}
         answer = result["answer"]
-        for position in range(0, len(answer), 24):
-            await emit("message_delta", {"text": answer[position:position + 24]})
-            await asyncio.sleep(0.015)
+        if not streamed:
+            for position in range(0, len(answer), 80):
+                await emit("message_delta", {"text": answer[position:position + 80]})
         return {"text": answer, "action": result.get("action")}
     return await tasks.create_task(request.snapshot.tripId, request.snapshot.tripSecret, request.snapshot.revision, "chat", worker)
 

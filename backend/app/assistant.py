@@ -4,13 +4,15 @@ import asyncio
 import httpx
 import re
 import logging
+import json
+from typing import Awaitable, Callable
 
 from .config import settings
 from .models import Place, Snapshot
 from .request_context import request_id
 
 
-async def _model(system: str, user: str, raise_on_error: bool = False) -> str | None:
+async def _model(system: str, user: str, raise_on_error: bool = False, on_delta: Callable[[str], Awaitable[None]] | None = None) -> str | None:
     deepseek = settings.ai_provider.lower() == "deepseek"
     api_key = settings.deepseek_api_key if deepseek else settings.openai_api_key
     base_url = settings.deepseek_base_url if deepseek else settings.openai_base_url
@@ -23,7 +25,36 @@ async def _model(system: str, user: str, raise_on_error: bool = False) -> str | 
             body = {"model": model, "temperature": 0.3, "max_tokens": 9000, "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
             if deepseek:
                 body["thinking"] = {"type": "disabled"}
-            response = await asyncio.wait_for(client.post(f"{base_url.rstrip('/')}/chat/completions", headers={"Authorization": f"Bearer {api_key}"}, json=body), timeout=65)
+            url = f"{base_url.rstrip('/')}/chat/completions"
+            headers = {"Authorization": f"Bearer {api_key}"}
+            if on_delta is not None:
+                body["stream"] = True
+                fragments: list[str] = []
+                finish_reason = None
+                async with client.stream("POST", url, headers=headers, json=body) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        value = line[6:].strip()
+                        if value == "[DONE]":
+                            break
+                        event = json.loads(value)
+                        if event.get("error"):
+                            raise RuntimeError("AI 流式返回失败，请重试")
+                        choice = event.get("choices", [{}])[0]
+                        delta = choice.get("delta") or {}
+                        piece = delta.get("content")
+                        if isinstance(piece, str) and piece:
+                            fragments.append(piece)
+                            await on_delta(piece)
+                        if choice.get("finish_reason"):
+                            finish_reason = choice["finish_reason"]
+                if finish_reason not in ("stop", "end_turn") or not fragments:
+                    raise RuntimeError("AI 流式回复不完整，请重试")
+                logging.getLogger(__name__).info("AI stream completed request_id=%s provider=%s elapsed_ms=%d characters=%d", request_id.get(), settings.ai_provider, int((__import__("time").monotonic()-started)*1000), sum(map(len, fragments)))
+                return "".join(fragments)
+            response = await asyncio.wait_for(client.post(url, headers=headers, json=body), timeout=65)
             response.raise_for_status()
             data = response.json()
             choice = data["choices"][0]
@@ -72,7 +103,7 @@ async def introduce(place: Place) -> str:
     return f"{text}\n\n来源：{_source(place)}。开放状态、门票、预约与临时公告：未知 / 尚未从官方渠道核实。"
 
 
-async def chat(snapshot: Snapshot, message: str) -> str:
+async def chat(snapshot: Snapshot, message: str, on_delta: Callable[[str], Awaitable[None]] | None = None) -> str:
     places = [p.name for p in snapshot.pendingPlaces[:12]]
     saved = [p.name for p in snapshot.savedPlaces[:12]]
     days = [[stop.place.name for stop in day.stops] for day in snapshot.itinerary]
@@ -107,13 +138,19 @@ async def chat(snapshot: Snapshot, message: str) -> str:
               "所有行程内容都属于同一个当前旅行计划，不要人为划分不同等级或类别的行程。"
               "如有最新生成的行程文档，必须以其Markdown内容为准回答行程问题；旧的行程文档只是历史版本。"
               "只能把收到的旅行快照作为当前状态。不能宣称已经修改行程，也不能编造开放时间、票价、预约或交通时间。"
+              "当地点或行程内容适合卡片展示时，可输出 fenced code block，语言标记为 travel-card，内容为单个JSON对象，"
+              "只允许 title、description、category、tip、url 字段；其中url必须是已有证据链接，不得编造。"
+              "卡片不应替代必要的文字回答，不要过量使用。"
               "若用户要求修改，明确说需要在行程面板操作或先生成预览。回答用简体中文，可使用Markdown，简洁具体。")
     user = f"偏好：{snapshot.preferences.model_dump_json()}\n待安排：{places}\n收藏：{saved}\n当前行程文档（最后一份为当前行程）：{generated}\n当前行程路线与停靠地点（供地图显示）：{days}\n最近对话：{snapshot.recentMessages}\n当前选中：{snapshot.selectedPlace.name if snapshot.selectedPlace else '无'}\n问题：{message}\n联网搜索结果：{web_context if web_context else '未获得可用网页资料'}"
-    answer = await _model(system, user, raise_on_error=True)
+    answer = await _model(system, user, raise_on_error=True, on_delta=on_delta)
     if answer:
         if web_sources:
             links = "\n".join(f"[来源{i}] [{s['title']}]({s['url']})" for i, s in enumerate(web_sources, 1))
-            return f"{answer}\n\n**本次联网检索来源**\n{links}"
+            appendix = f"\n\n**本次联网检索来源**\n{links}"
+            if on_delta:
+                await on_delta(appendix)
+            return answer + appendix
         return answer
     if "规划" in message or "行程" in message:
         if generated:
