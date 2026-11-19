@@ -9,6 +9,7 @@ import {
   IconUsers,
 } from "@tabler/icons-react";
 import { defaultPreferences } from "../lib/db";
+import { HotelPicker } from "./HotelPicker";
 import type { Preferences } from "../types";
 
 type Props = {
@@ -36,6 +37,11 @@ const steps = [
     icon: IconMapPin,
   },
   {
+    title: "住在哪里",
+    note: "地图与文字搜索选定酒店或每日出发位置（可跳过）",
+    icon: IconMapPin,
+  },
+  {
     title: "还有特别安排吗",
     note: "写下必去地点、固定活动和其他要求",
     icon: IconCoinYuan,
@@ -45,6 +51,20 @@ const steps = [
 export function Wizard({ onBack, onFinish }: Props) {
   const [step, setStep] = useState(0);
   const [value, setValue] = useState<Preferences>({ ...defaultPreferences });
+  const companionChoices = value.company.split("、").filter(Boolean);
+  const solo = companionChoices.includes("独自出行");
+  const toggleCompany = (option: string) => {
+    if (option === "独自出行") {
+      const next = solo ? "" : "独自出行";
+      setValue((current) => ({ ...current, company: next, people: 1 }));
+      return;
+    }
+    if (solo) return;
+    const next = companionChoices.includes(option)
+      ? companionChoices.filter((item) => item !== option)
+      : [...companionChoices, option];
+    set("company", next.join("、"));
+  };
   const set = <K extends keyof Preferences>(key: K, next: Preferences[K]) =>
     setValue((current) => ({ ...current, [key]: next }));
   const toggleInterest = (interest: string) =>
@@ -65,7 +85,7 @@ export function Wizard({ onBack, onFinish }: Props) {
           <span>漫游武汉</span>
         </button>
         <span className="wizard-count">
-          旅行设置 / {String(step + 1).padStart(2, "0")} OF 04
+          旅行设置 / {String(step + 1).padStart(2, "0")} OF {String(steps.length).padStart(2, "0")}
         </span>
       </header>
       <main className="wizard-main">
@@ -101,7 +121,7 @@ export function Wizard({ onBack, onFinish }: Props) {
           <div className="form-icon">
             <CurrentIcon size={25} stroke={1.4} />
           </div>
-          <p className="section-kicker">第 {step + 1} 步，共 4 步</p>
+          <p className="section-kicker">第 {step + 1} 步，共 {steps.length} 步</p>
           <h2>{steps[step].title}</h2>
           <p className="form-note">{steps[step].note}</p>
           {step === 0 && (
@@ -143,6 +163,7 @@ export function Wizard({ onBack, onFinish }: Props) {
                 <div className="stepper">
                   <button
                     onClick={() => set("people", Math.max(1, value.people - 1))}
+                    disabled={solo}
                     aria-label="减少人数"
                   >
                     −
@@ -152,19 +173,22 @@ export function Wizard({ onBack, onFinish }: Props) {
                     onClick={() =>
                       set("people", Math.min(20, value.people + 1))
                     }
+                    disabled={solo}
                     aria-label="增加人数"
                   >
                     ＋
                   </button>
                 </div>
               </label>
-              <div className="field-label">同行类型</div>
+              <div className="field-label">同行类型 <span>可多选；独自出行与其他类型互斥</span></div>
               <div className="choice-grid">
                 {["独自出行", "情侣", "朋友", "亲子", "长辈"].map((option) => (
                   <button
-                    className={`choice ${value.company === option ? "selected" : ""}`}
+                    className={`choice ${companionChoices.includes(option) ? "selected" : ""}`}
                     key={option}
-                    onClick={() => set("company", option)}
+                    disabled={solo && option !== "独自出行"}
+                    aria-pressed={companionChoices.includes(option)}
+                    onClick={() => toggleCompany(option)}
                   >
                     {option}
                   </button>
@@ -227,6 +251,17 @@ export function Wizard({ onBack, onFinish }: Props) {
             </div>
           )}
           {step === 3 && (
+            <div className="field-stack hotel-field-stack">
+              <HotelPicker
+                value={value.lodging || ""}
+                location={value.lodgingLocation || null}
+                onChange={(lodging, lodgingLocation) =>
+                  setValue((current) => ({ ...current, lodging, lodgingLocation }))
+                }
+              />
+            </div>
+          )}
+          {step === 4 && (
             <div className="field-stack">
               <label>
                 个性化要求 <span>选填</span>
@@ -253,9 +288,9 @@ export function Wizard({ onBack, onFinish }: Props) {
             </button>
             <button
               className="button primary"
-              onClick={() => (step === 3 ? onFinish(value) : setStep(step + 1))}
+              onClick={() => (step === steps.length - 1 ? onFinish(value) : setStep(step + 1))}
             >
-              {step === 3 ? "进入地图" : "下一步"}
+              {step === steps.length - 1 ? "进入地图" : "下一步"}
               <IconArrowRight size={18} />
             </button>
           </div>

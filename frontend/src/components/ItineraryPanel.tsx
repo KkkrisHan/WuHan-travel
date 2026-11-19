@@ -183,7 +183,7 @@ export function ItineraryPanel(props: Props) {
                   <h3>为你找到 {candidates.length} 套路线</h3>
                 </div>
                 <p className="small-muted">
-                  预览仅影响地图显示，采用后才会保存正式行程。
+                  预览仅影响地图显示，采用后才会更新当前行程。
                 </p>
                 {candidates.map((candidate) => (
                   <article

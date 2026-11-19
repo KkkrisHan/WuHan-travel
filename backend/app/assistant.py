@@ -103,11 +103,12 @@ async def chat(snapshot: Snapshot, message: str) -> str:
               "若有网页证据，优先根据证据解释用户所问的历史、景点和文化知识，引用[来源编号]；"
               "若未检索到网页资料，必须明确说明本次联网搜索没有获得可用证据，不得假装已联网核实。"
               "网页证据不能证明的实时价格、开放状态、预约等必须标注未核实。"
-              "必须区分两类行程：正式行程（已应用到日程面板）与独立生成的行程文档（已生成、已保存，但不一定应用到正式行程）。"
-              "不能因为正式行程为空就说用户没有生成行程。如果有生成的行程文档，要明确承认并根据其Markdown内容回答用户。"
+              "用户只有一份当前行程：最新生成的行程文档就是当前已保存的完整行程，路线日程是同一份行程的地图结构。"
+              "所有行程内容都属于同一个当前旅行计划，不要人为划分不同等级或类别的行程。"
+              "如有最新生成的行程文档，必须以其Markdown内容为准回答行程问题；旧的行程文档只是历史版本。"
               "只能把收到的旅行快照作为当前状态。不能宣称已经修改行程，也不能编造开放时间、票价、预约或交通时间。"
               "若用户要求修改，明确说需要在行程面板操作或先生成预览。回答用简体中文，可使用Markdown，简洁具体。")
-    user = f"偏好：{snapshot.preferences.model_dump_json()}\n待安排：{places}\n收藏：{saved}\n正式行程（已应用）：{days}\n已生成的独立行程文档：{generated}\n最近对话：{snapshot.recentMessages}\n当前选中：{snapshot.selectedPlace.name if snapshot.selectedPlace else '无'}\n问题：{message}\n联网搜索结果：{web_context if web_context else '未获得可用网页资料'}"
+    user = f"偏好：{snapshot.preferences.model_dump_json()}\n待安排：{places}\n收藏：{saved}\n当前行程文档（最后一份为当前行程）：{generated}\n当前行程路线与停靠地点（供地图显示）：{days}\n最近对话：{snapshot.recentMessages}\n当前选中：{snapshot.selectedPlace.name if snapshot.selectedPlace else '无'}\n问题：{message}\n联网搜索结果：{web_context if web_context else '未获得可用网页资料'}"
     answer = await _model(system, user, raise_on_error=True)
     if answer:
         if web_sources:
@@ -117,15 +118,17 @@ async def chat(snapshot: Snapshot, message: str) -> str:
     if "规划" in message or "行程" in message:
         if generated:
             names = "、".join(str(doc.get("title", "未命名行程")) for doc in generated)
-            return f"你已生成 {len(generated)} 份独立行程文档：{names}。正式行程面板目前有 {len(days)} 天安排。独立文档和正式行程是不同的状态。"
-        return f"当前有 {len(places)} 个待安排地点，正式行程 {len(days)} 天，尚未收到独立行程文档。可以在「行程」中生成路线并比较。开放、预约和费用会标记待核实。"
+            return f"你已保存 {len(generated)} 份行程版本：{names}。其中最新的一份就是当前行程，可以直接查看其每日安排和路线。"
+        return f"当前有 {len(places)} 个必去地点，行程路线已有 {len(days)} 天安排。可在「必去景点」中生成或更新当前行程，开放、预约和费用会标记待核实。"
     if snapshot.selectedPlace:
         return f"当前选中 {snapshot.selectedPlace.name}。可以查看地点介绍，或先加入待安排地点。涉及营业、门票和预约的信息需要官方核实。"
     return "我可以结合当前旅行偏好、待安排地点和行程回答问题。选择一个地点，或告诉我想去哪里、玩几天。"
 
 
 def simple_patch(snapshot: Snapshot, message: str) -> dict | None:
-    """A narrow, validated write tool for an unambiguous simple request."""
+    """Avoid modifying map-only stops while leaving saved itinerary text unchanged."""
+    if snapshot.generatedItineraries:
+        return None
     if not re.search(r"删除|移除|去掉", message):
         return None
     matches = [(day.id, stop.id, stop.place.name) for day in snapshot.itinerary for stop in day.stops if stop.place.name in message]

@@ -26,12 +26,14 @@ class Preferences(BaseModel):
     startDate: str | None = None
     days: int = Field(default=1, ge=1, le=7)
     people: int = Field(default=1, ge=1, le=20)
-    company: str = "独自出行"
+    company: str = ""
     budget: str = "灵活"
     pace: str = "适中"
     transport: str = "步行与公共交通"
     interests: list[str] = Field(default_factory=list)
     requirements: str = ""
+    lodging: str = ""
+    lodgingLocation: Point | None = None
 
 
 class Stop(BaseModel):

@@ -20,6 +20,8 @@ export type Preferences = {
   transport: string;
   interests: string[];
   requirements: string;
+  lodging: string;
+  lodgingLocation?: Point | null;
 };
 export type Stop = {
   id: string;
@@ -88,6 +90,7 @@ export type GeneratedItinerary = {
   mustVisitPlaces: Place[];
   recommendedPlaces: Place[];
   createdAt: string;
+  dayPlans?: DayPlan[];
 };
 export type TripVersion = {
   id: string;

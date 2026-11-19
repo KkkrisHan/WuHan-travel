@@ -2445,3 +2445,28 @@ textarea:focus-visible,
 }
 .markdown-content{overflow-wrap:anywhere;min-width:0}.markdown-content table{table-layout:fixed}.markdown-content th,.markdown-content td{overflow-wrap:anywhere;vertical-align:top}.markdown-content blockquote{border-left:3px solid #5c8a8e;margin:1em 0;padding-left:1em}.markdown-content a{color:#80d8d3}.markdown-content hr{border:0;border-top:1px solid #5c7679}
 .place-info{max-height:45vh;overflow:auto}.place-info-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}.place-info-heading button{border:1px solid #63888b;background:transparent;color:inherit;border-radius:5px;padding:3px 8px}.place-info small{display:block;margin:8px 0;color:#b5cbce}.place-info dl{margin:8px 0}.place-info dl>div{display:grid;grid-template-columns:92px minmax(0,1fr);gap:8px;border-top:1px solid #3e565a;padding:6px 0}.place-info dt{color:#a9c2c5}.place-info dd{margin:0;overflow-wrap:anywhere}.place-info a{color:#93d7d3}.place-info-intro,.place-info-sources{border-top:1px solid #3e565a;margin-top:12px;padding-top:8px}.place-info-intro p,.place-info-sources p{margin:7px 0;line-height:1.55;overflow-wrap:anywhere}
+
+/* Hotel selection in the pre-trip wizard */
+.choice:disabled,.choice:disabled:hover {
+  color:#637982; background:#101b22; border-color:#273941;
+  cursor:not-allowed; opacity:.48;
+}
+.stepper button:disabled { color:#506970; cursor:not-allowed; }
+.hotel-field-stack { min-height:0; }
+.hotel-picker { display:flex; flex-direction:column; gap:10px; min-width:0; }
+.hotel-picker>label { font-weight:700; color:#e0eeee; font-size:12px; }
+.hotel-picker-hint { margin:0; font-size:12px; line-height:1.6; color:#9ab0b4; }
+.hotel-picker-map { overflow:hidden; height:245px; border:1px solid #38545b; border-radius:9px; background:#192b32; }
+.hotel-picker-canvas { width:100%; height:100%; }
+.hotel-map-fallback { display:grid; place-items:center; height:100%; padding:20px; text-align:center; color:#93aeb4; }
+.hotel-picker-results { display:flex; flex-direction:column; gap:3px; max-height:170px; overflow:auto; border:1px solid #395960; border-radius:8px; background:#101e25; }
+.hotel-picker-results button { display:flex; flex-direction:column; gap:4px; padding:10px 12px; background:transparent; border:0; border-bottom:1px solid #2c424b; color:#e7f8f6; text-align:left; cursor:pointer; }
+.hotel-picker-results button:hover { background:#193a3e; }
+.hotel-picker-results button span { font-size:11px; color:#9ab0b4; }
+.hotel-picker-selected { margin:0; font-size:12px; color:#7de0d2; word-break:break-word; }
+.hotel-picker-clear { align-self:flex-start; color:#a4c2c4; background:transparent; border:0; padding:4px 0; cursor:pointer; text-decoration:underline; }
+.generator-summary { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin:18px 0; }
+.generator-summary>div { display:flex; flex-direction:column; gap:6px; min-width:0; padding:12px; background:#0d1c23; border:1px solid #355259; border-radius:7px; }
+.generator-summary span { font-size:11px; color:#99b2b7; }
+.generator-summary strong { font-size:13px; overflow-wrap:anywhere; color:#e8f7f7; }
+@media(max-width:560px) { .generator-summary {grid-template-columns:1fr;} .hotel-picker-map {height:220px;} }

@@ -35,6 +35,7 @@ import {
   updateMessages,
 } from "./lib/db";
 import { exportTrip } from "./lib/export";
+import { recoverItinerary } from "./lib/itinerary";
 import type {
   Candidate,
   Message,
@@ -83,15 +84,11 @@ function App() {
   );
   const [featured, setFeatured] = useState<Place[]>([]);
   const [selected, setSelected] = useState<Place | null>(null);
-  const [rightTab, setRightTab] = useState("must-visit");
+  const [rightTab, setRightTab] = useState("assistant");
   const [generateOpen, setGenerateOpen] = useState(false);
   const [generateBusy, setGenerateBusy] = useState(false);
   const [generateError, setGenerateError] = useState("");
   const [specialRequirements, setSpecialRequirements] = useState("");
-  const [travelers, setTravelers] = useState(1);
-  const [travelDays, setTravelDays] = useState(1);
-  const [travelDate, setTravelDate] = useState("");
-  const [lodging, setLodging] = useState("");
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [previewId, setPreviewId] = useState<string | null>(null);
   const [candidateBase, setCandidateBase] = useState<number | null>(null);
@@ -183,6 +180,15 @@ function App() {
   }, []);
 
   const openTrip = (next: Trip) => {
+    const latest = next.generatedItineraries?.at(-1);
+    if (!next.itinerary.length && latest) {
+      const recovered = recoverItinerary(latest);
+      if (recovered.length) {
+        mutateTrip(next.id, "恢复已生成的当前行程路线", (draft) => {
+          if (!draft.itinerary.length) draft.itinerary = recovered;
+        }, undefined, "agent").catch(inform);
+      }
+    }
     setTripId(next.id);
     setSelected(null);
     setCandidates([]);
@@ -190,7 +196,7 @@ function App() {
     setCandidateBase(null);
     setActiveDay(0);
     setShowAll(false);
-    setRightTab("must-visit");
+    setRightTab("assistant");
     setPage("workspace");
   };
   const backToDashboard = () => {
@@ -239,22 +245,65 @@ function App() {
         draft.savedPlaces.push(place);
     });
   const openGenerator = () => {
+    if (!trip) return;
+    setSpecialRequirements(trip.preferences.requirements || "");
     setGenerateError("");
     setGenerateOpen(true);
   };
   const generateDocument = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!trip || !Number.isInteger(travelers) || travelers < 1 || travelers > 30 || !Number.isInteger(travelDays) || travelDays < 1 || travelDays > 14) {
-      setGenerateError("人数需为 1–30 的正整数，天数需为 1–14 的正整数。"); return;
+    if (!trip) return;
+    const prefs = trip.preferences;
+    if (!Number.isInteger(prefs.people) || prefs.people < 1 || !Number.isInteger(prefs.days) || prefs.days < 1) {
+      setGenerateError("旅行设置中的人数或天数无效，请先修改设置。");
+      return;
     }
-    setGenerateBusy(true); setGenerateError("");
+    setGenerateBusy(true);
+    setGenerateError("");
     try {
-      const generated = await api.generateItinerary({mustVisitPlaces: trip.pendingPlaces, people: travelers, days: travelDays, requirements: specialRequirements, startDate: travelDate || null, transport: trip.preferences.transport, lodging});
-      const document = {id: crypto.randomUUID(), title: generated.title, markdown: generated.markdown, people: travelers, days: travelDays, requirements: specialRequirements, mustVisitPlaces: structuredClone(trip.pendingPlaces), recommendedPlaces: generated.recommendedPlaces, createdAt: new Date().toISOString()};
-      await mutateTrip(trip.id, "生成独立行程", (draft) => { draft.generatedItineraries = [...(draft.generatedItineraries || []), document]; });
-      setRightTab(document.id); setGenerateOpen(false);
-    } catch (error) { setGenerateError(error instanceof Error ? error.message : "行程生成失败"); }
-    finally { setGenerateBusy(false); }
+      const requirements = [
+        prefs.company ? `同行类型：${prefs.company}` : "",
+        `预算：${prefs.budget}；游玩节奏：${prefs.pace}`,
+        prefs.interests.length ? `兴趣：${prefs.interests.join("、")}` : "",
+        specialRequirements.trim(),
+      ].filter(Boolean).join("\n");
+      const generated = await api.generateItinerary({
+        mustVisitPlaces: trip.pendingPlaces,
+        people: prefs.people,
+        days: prefs.days,
+        requirements,
+        startDate: prefs.startDate || null,
+        transport: prefs.transport,
+        lodging: prefs.lodging || "",
+        lodgingLocation: prefs.lodgingLocation || null,
+      });
+      if (generated.dayPlans.length !== prefs.days || generated.dayPlans.some((day) => !day.stops.length))
+        throw new Error("服务端返回的日程不完整，未保存，请重试。");
+      const document = {
+        id: crypto.randomUUID(),
+        title: generated.title,
+        markdown: generated.markdown,
+        people: prefs.people,
+        days: prefs.days,
+        requirements,
+        mustVisitPlaces: structuredClone(trip.pendingPlaces),
+        recommendedPlaces: generated.recommendedPlaces,
+        dayPlans: generated.dayPlans,
+        createdAt: new Date().toISOString(),
+      };
+      await mutateTrip(trip.id, "生成当前行程", (draft) => {
+        draft.generatedItineraries = [...(draft.generatedItineraries || []), document].slice(-5);
+        draft.itinerary = structuredClone(generated.dayPlans);
+      });
+      setActiveDay(0);
+      setShowAll(false);
+      setRightTab(document.id);
+      setGenerateOpen(false);
+    } catch (error) {
+      setGenerateError(error instanceof Error ? error.message : "行程生成失败");
+    } finally {
+      setGenerateBusy(false);
+    }
   };
 
   const track = (
@@ -880,7 +929,28 @@ function App() {
           </button>
         </div>
       )}
-      {generateOpen && <div className="modal-backdrop" role="presentation"><form className="generator-modal" onSubmit={generateDocument}><button type="button" className="modal-close" onClick={() => setGenerateOpen(false)}>×</button><h2>生成旅行行程</h2><label>特殊要求<textarea value={specialRequirements} onChange={e => setSpecialRequirements(e.target.value)} rows={4} placeholder="旅行节奏、兴趣或其他安排" /></label><div className="generator-fields"><label>旅行人数<input type="number" min="1" max="30" step="1" value={travelers} onChange={e => setTravelers(Number(e.target.value))}/></label><label>旅行天数<input type="number" min="1" max="14" step="1" value={travelDays} onChange={e => setTravelDays(Number(e.target.value))}/></label><label>开始日期<input type="date" value={travelDate} onChange={e => setTravelDate(e.target.value)}/></label></div><label>住宿或每日出发地点 <span>选填；填写后计算往返路线</span><input value={lodging} onChange={e => setLodging(e.target.value)} maxLength={120} placeholder="武汉的酒店名称或完整地址" /></label><p>必去景点 {trip.pendingPlaces.length} 个 · {travelDate || "日期未定"} · {trip.preferences.transport}</p>{generateError && <div role="alert">{generateError}</div>}<button type="button" disabled={generateBusy} onClick={() => setGenerateOpen(false)}>取消</button><button className="button primary" disabled={generateBusy}>{generateBusy ? "正在生成行程…" : "开始生成行程"}</button></form></div>}
+      {generateOpen && (
+        <div className="modal-backdrop" role="presentation">
+          <form className="generator-modal" onSubmit={generateDocument}>
+            <button type="button" className="modal-close" onClick={() => setGenerateOpen(false)}>×</button>
+            <h2>生成旅行行程</h2>
+            <p className="form-note">以下资料已从旅行设置自动读取，无需再次填写。</p>
+            <div className="generator-summary">
+              <div><span>同行人数与类型</span><strong>{trip.preferences.people} 人 · {trip.preferences.company || "未指定类型"}</strong></div>
+              <div><span>天数与日期</span><strong>{trip.preferences.days} 天 · {trip.preferences.startDate || "日期未定"}</strong></div>
+              <div><span>主要交通方式</span><strong>{trip.preferences.transport}</strong></div>
+              <div><span>住宿 / 每日出发地点</span><strong>{trip.preferences.lodging || "未指定"}</strong></div>
+            </div>
+            <label>补充行程要求 <span>可选，已带入旅行设置中的要求</span>
+              <textarea value={specialRequirements} onChange={(e) => setSpecialRequirements(e.target.value)} rows={3} placeholder="例如：周六下午有固定活动，优先安排附近景点" maxLength={1000} />
+            </label>
+            <p>必去景点 {trip.pendingPlaces.length} 个 · 生成后自动保存为当前行程并显示路线。</p>
+            {generateError && <div role="alert">{generateError}</div>}
+            <button type="button" disabled={generateBusy} onClick={() => setGenerateOpen(false)}>取消</button>
+            <button className="button primary" disabled={generateBusy}>{generateBusy ? "正在生成行程…" : "生成当前行程"}</button>
+          </form>
+        </div>
+      )}
     </div>
   );
 }

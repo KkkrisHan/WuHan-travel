@@ -143,6 +143,27 @@ async def places_detail(place_id: str):
     return {"place": (await place_details(place_id)).model_dump()}
 
 
+@app.get("/api/places/reverse-geocode")
+async def reverse_geocode(lng: float, lat: float):
+    point = Point(lng=lng, lat=lat)
+    if not settings.amap_web_service_key:
+        raise HTTPException(503, "尚未配置高德 Web 服务密钥")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=4)) as client:
+            response = await client.get(
+                "https://restapi.amap.com/v3/geocode/regeo",
+                params={"key": settings.amap_web_service_key, "location": f"{point.lng},{point.lat}", "extensions": "base"},
+            )
+            response.raise_for_status()
+            data = response.json()
+        address = data.get("regeocode", {}).get("formatted_address", "") if data.get("status") == "1" else ""
+        if not isinstance(address, str) or not address.strip():
+            raise HTTPException(502, "地图位置未找到可核实地址")
+        return {"address": address.strip(), "location": point.model_dump()}
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        raise HTTPException(502, "地图逆地理编码失败") from exc
+
+
 class PlaceInfoRequest(BaseModel):
     place: Place
     refresh: bool = False
@@ -161,6 +182,7 @@ class ItineraryRequest(BaseModel):
     startDate: str | None = None
     transport: str = "步行与公共交通"
     lodging: str = Field(default="", max_length=120)
+    lodgingLocation: Point | None = None
 
 
 def _meters(a: Point, b: Point) -> float:

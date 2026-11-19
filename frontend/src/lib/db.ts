@@ -21,12 +21,14 @@ export const defaultPreferences: Preferences = {
   startDate: null,
   days: 1,
   people: 1,
-  company: "独自出行",
+  company: "",
   budget: "灵活",
   pace: "适中",
   transport: "步行与公共交通",
   interests: [],
   requirements: "",
+  lodging: "",
+  lodgingLocation: null,
 };
 const clone = <T>(value: T): T => structuredClone(value);
 const tripData = (trip: Trip): TripData => ({

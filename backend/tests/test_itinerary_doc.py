@@ -31,7 +31,25 @@ class ItineraryDocumentTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("停留办理或查看约 20 分钟", markdown)
         self.assertIn("预计驾车约 18 分钟", markdown)
         self.assertEqual(len(result["recommendedPlaces"]), 6)
+        self.assertEqual(len(result["dayPlans"]), 4)
+        self.assertEqual({stop["place"]["name"] for day in result["dayPlans"] for stop in day["stops"]}, {place.name for place in required + candidates})
+        self.assertTrue(all(day["stops"] and len(day["legs"]) == len(day["stops"]) - 1 for day in result["dayPlans"]))
         self.assertTrue(markdown.rstrip().endswith("高峰期给餐饮、打车与过江交通预留额外时间。"))
+
+    async def test_selected_lodging_point_skips_extra_geocoding(self):
+        required = [place("黄鹤楼", "y", 114.302, 30.545)]
+        lodging_point = Point(lng=114.31, lat=30.56)
+        request = SimpleNamespace(
+            mustVisitPlaces=required, people=1, days=1, requirements="",
+            startDate=None, transport="打车 / 驾车",
+            lodging="已选酒店", lodgingLocation=lodging_point,
+        )
+        route = AsyncMock(return_value={"minutes": 10, "minutesMin": None, "minutesMax": None, "distanceMeters": 1300, "source": "高德地图路线规划", "polyline": []})
+        with patch("app.itinerary_doc.settings.amap_web_service_key", "test"), patch("app.itinerary_doc.search_places", new=AsyncMock(return_value=([], "高德 POI"))), patch("app.itinerary_doc._model", new=AsyncMock(return_value=None)), patch("app.itinerary_doc.calculate_route", new=route), patch("app.itinerary_doc._lodging_point", new=AsyncMock(side_effect=AssertionError("应复用地图坐标"))):
+            result = await build_itinerary(request)
+        self.assertEqual(len(result["dayPlans"]), 1)
+        self.assertEqual(result["dayPlans"][0]["stops"][0]["place"]["name"], "黄鹤楼")
+        self.assertEqual(route.await_args_list[0].args[0], lodging_point)
 
     async def test_route_failure_has_labeled_range(self):
         with patch("app.places.settings.amap_web_service_key", ""):

@@ -6,13 +6,14 @@ import json
 import math
 import re
 from datetime import date, datetime, timedelta
+from uuid import uuid4
 
 import httpx
 from fastapi import HTTPException
 
 from .assistant import _model
 from .config import settings
-from .models import Place, Point
+from .models import Place, Point, DayPlan, Stop, Leg
 from .places import calculate_route, search_places
 
 
@@ -24,7 +25,7 @@ _GENERIC_POI_NAMES = {
 
 
 def _is_specific_destination(place: Place) -> bool:
-    name = re.sub(r"\\s+", "", place.name).strip()
+    name = re.sub(r"\s+", "", place.name).strip()
     return (
         bool(name)
         and name not in _GENERIC_POI_NAMES
@@ -183,7 +184,7 @@ async def build_itinerary(request) -> dict:
     if any(not items for items in day_places):
         raise HTTPException(502, "行程分天失败")
     lodging = request.lodging.strip() if request.lodging else ""
-    lodging_point = await _lodging_point(lodging) if lodging else None
+    lodging_point = getattr(request, "lodgingLocation", None) or (await _lodging_point(lodging) if lodging else None)
     lines = [f"# 武汉{request.days}日旅行计划", "", "## 旅行概览", "",
              f"- **日期**：{first_date.isoformat() if first_date else '未指定'}" + (f" 至 {(first_date+timedelta(days=request.days-1)).isoformat()}" if first_date else ""),
              f"- **人数**：{request.people} 人", f"- **节奏与要求**：{request.requirements or '按舒缓节奏安排'}",
@@ -192,11 +193,16 @@ async def build_itinerary(request) -> dict:
     required_ids = {p.placeId for p in required}
     seen_ids: set[str] = set()
     route_sources: set[str] = set()
+    structured_days: list[dict] = []
     for day_index, items in enumerate(day_places):
         day_date = (first_date + timedelta(days=day_index)).isoformat() if first_date else f"第{day_index+1}天（日期未定）"
         lines += [f"## Day {day_index+1} · {day_date}", "", f"### 当日主题：{items[0].category}与邻近区域", "",
                   "| 时段 | 地点与类别 | 安排 | 交通 |", "| --- | --- | --- | --- |"]
         current_time = datetime.combine(date.today(), datetime.strptime("09:00", "%H:%M").time())
+        day_stop_ids = [uuid4().hex for _ in items]
+        day_stops: list[Stop] = []
+        day_legs: list[Leg] = []
+        day_transport_minutes = 0
         if lodging_point:
             route = await calculate_route(lodging_point, items[0].location, mode)
             route_sources.add(route["source"])
@@ -218,11 +224,14 @@ async def build_itinerary(request) -> dict:
             phase = "上午" if arrival.hour < 12 else "下午" if arrival.hour < 18 else "晚间"
             action = "停留办理或查看约" if stop_minutes == 20 else "建议游览约"
             lines.append(f"| {phase} | {marker}{place.name}（{place.category}） | {arrival:%H:%M}–{departure:%H:%M}；{action} {stop_minutes} 分钟 | {('首站' if index == 0 else transport_text)} |")
+            day_stops.append(Stop(id=day_stop_ids[index], place=place, arrival=f"{arrival:%H:%M}", departure=f"{departure:%H:%M}", minutes=stop_minutes))
             current_time = departure
             if index < len(items)-1:
                 leg_mode = "walking" if _meters(place.location, items[index+1].location) < 800 else mode
                 route = await calculate_route(place.location, items[index+1].location, leg_mode)
                 route_sources.add(route["source"])
+                day_legs.append(Leg(fromStopId=day_stop_ids[index], toStopId=day_stop_ids[index+1], mode=leg_mode, minutes=route["minutes"], minutesMin=route.get("minutesMin"), minutesMax=route.get("minutesMax"), distanceMeters=route.get("distanceMeters"), source=route["source"], polyline=route.get("polyline") or []))
+                day_transport_minutes += route["minutes"]
                 transport_text = _route_text(route, leg_mode)
                 current_time += timedelta(minutes=route["minutes"])
         if not any("午餐" in row for row in lines[-len(items)-2:]):
@@ -237,9 +246,11 @@ async def build_itinerary(request) -> dict:
         lines += ["", "### 当日路线", "", " → ".join(p.name for p in items) + "。地点按地理邻近性排序，跨江或拥堵时请以当日导航为准。", "",
                   "### 注意事项", "", "- 各地点开放、票价与预约信息请在出发前查看地点详情的来源和核查时间。",
                   "- 交通时间为高德规划值或标明区间的距离估算；实际打车等待、路况和排队需另留弹性。", ""]
+        structured_days.append(DayPlan(id=uuid4().hex, date=day_date, stops=day_stops, legs=day_legs, transportMinutes=day_transport_minutes, sightseeingMinutes=sum(stop.minutes for stop in day_stops), meals=["午餐与休息"], budgetNote="费用以当天官方票价与实际交通支出为准", warnings=["地点开放、预约和交通时间请在出发前核实。"]).model_dump())
     missing = [p.name for p in required if p.placeId not in seen_ids]
     if missing or len(day_places) != request.days or any(not day for day in day_places):
         raise HTTPException(502, "行程完整性校验失败：" + "、".join(missing))
     lines += ["## 行程结束与核查清单", "", "- 出发前再次确认景区当天公告、预约入口与票价。", "- 高峰期给餐饮、打车与过江交通预留额外时间。", ""]
     return {"title": f"武汉{request.days}日旅行计划", "markdown": "\n".join(lines),
-            "recommendedPlaces": [p.model_dump() for p in recommendations], "routeSource": "；".join(sorted(route_sources))}
+            "recommendedPlaces": [p.model_dump() for p in recommendations], "routeSource": "；".join(sorted(route_sources)),
+            "dayPlans": structured_days}
