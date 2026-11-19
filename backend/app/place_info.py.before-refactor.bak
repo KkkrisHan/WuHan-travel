@@ -1,0 +1,165 @@
+"""Live place research with source evidence and a short-lived SQLite cache."""
+from __future__ import annotations
+
+import json
+import re
+import sqlite3
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
+
+import httpx
+
+from .assistant import _model
+from .config import settings
+from .models import Place
+
+FIELDS = ("openingHours", "todayNotice", "adultPrice", "discounts", "reservation", "reservationUrl", "phone", "address", "visitorNotes")
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _cache_connection():
+    con = sqlite3.connect(settings.task_database)
+    con.execute("CREATE TABLE IF NOT EXISTS place_info_cache (place_key TEXT PRIMARY KEY, payload TEXT NOT NULL, checked_at TEXT NOT NULL)")
+    return con
+
+
+def _official(place: Place, url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host.endswith(".gov.cn") or host == "gov.cn" or ("黄鹤楼" in place.name and host in ("cnhhl.com", "www.cnhhl.com"))
+
+
+def _source(place: Place, raw: dict, checked_at: str) -> dict | None:
+    url = raw.get("url", "")
+    if not isinstance(url, str) or urlparse(url).scheme not in ("http", "https") or not urlparse(url).hostname:
+        return None
+    return {"title": raw.get("title") or raw.get("site_name") or url, "url": url,
+            "publishedAt": raw.get("date"), "checkedAt": checked_at, "official": _official(place, url),
+            "summary": raw.get("summary") or raw.get("snippet") or "", "content": raw.get("content") or "",
+            "score": raw.get("rerank_score") or 0}
+
+
+def _clean_json(text: str) -> dict:
+    result = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip()))
+    return result if isinstance(result, dict) else {}
+
+
+def _normalize(text: str) -> str:
+    return re.sub(r"\s+", "", text).lower()
+
+
+async def get_place_info(place: Place, refresh: bool = False) -> dict:
+    key = f"{place.placeId}:{place.name}"
+    old = None
+    with closing(_cache_connection()) as con:
+        row = con.execute("SELECT payload, checked_at FROM place_info_cache WHERE place_key=?", (key,)).fetchone()
+        if row:
+            old = json.loads(row[0])
+            checked = datetime.fromisoformat(row[1])
+            if not refresh and _now() - checked < timedelta(hours=12):
+                return {**old, "stale": False, "cached": True}
+    checked_at = _now().isoformat()
+    if not settings.deepseek_api_key:
+        return {**old, "status": "unavailable", "stale": bool(old), "error": "未配置 DEEPSEEK_API_KEY"} if old else {
+            "status": "unavailable", "stale": False, "checkedAt": checked_at, "fields": {}, "sources": [], "introduction": "", "error": "未配置 DEEPSEEK_API_KEY"}
+    try:
+        queries = [f"{place.name} 官方网站 开放时间 门票 预约 电话", f"{place.name} 临时闭馆 今日公告 票价 预约 2026"]
+        if "黄鹤楼" in place.name:
+            queries[0] = "黄鹤楼 门票 开放时间 联系方式 site:cnhhl.com"
+        results = []
+        async with httpx.AsyncClient(timeout=35) as client:
+            for query in queries:
+                response = await client.post("https://api.deepseek.com/v1/tools/search",
+                    headers={"Authorization": f"Bearer {settings.deepseek_api_key}"},
+                    json={"query": query[:128], "count": 8, "need_content": False})
+                response.raise_for_status()
+                results.extend(response.json().get("results", []))
+            seen = set()
+            sources = []
+            for result in results:
+                source = _source(place, result, checked_at)
+                if source and source["url"] not in seen:
+                    seen.add(source["url"])
+                    sources.append(source)
+            sources.sort(key=lambda s: (not s["official"], -(s["score"] or 0)))
+            sources = sources[:8]
+            for source in sources[:4]:
+                if not source["official"]:
+                    continue
+                try:
+                    page = await client.post("https://api.deepseek.com/v1/tools/fetch",
+                        headers={"Authorization": f"Bearer {settings.deepseek_api_key}"},
+                        json={"url": source["url"]})
+                    if page.is_success:
+                        source["content"] = page.json().get("content", "")[:9000]
+                except httpx.HTTPError:
+                    pass
+        if not sources:
+            payload = {"status": "not_found", "checkedAt": checked_at, "fields": {}, "sources": [], "introduction": "未找到足以核实的公开资料。", "stale": False}
+        else:
+            evidence = [{"id": i+1, "title": s["title"], "url": s["url"], "official": s["official"],
+                         "publishedAt": s["publishedAt"], "text": (s["content"] or s["summary"])[:5500]} for i, s in enumerate(sources)]
+            prompt = (
+                "你是审慎的景区资料核查员。只使用给出的网页文字。返回 JSON 对象，含 fields、introduction、conflict。"
+                "fields 的键只能是 openingHours,todayNotice,adultPrice,discounts,reservation,reservationUrl,phone,address,visitorNotes；"
+                "每个值是 {value,evidence,sourceId}。evidence 必须是对应来源文字中的连续原文片段；无法找到证据则不输出该字段。"
+                "discounts 只概括儿童、学生和老年人的常见优惠，不罗列所有特殊身份；每个字段 value 不要加入 evidence 以外的细节。"
+                "旧公告不得当作今天的开放状态或现行预约政策；todayNotice 仅当前日期的公告才可写。"
+                "来源冲突时优先官方且在 conflict 中说明。introduction 用中文分段写概况、看点、游览体验、适合人群、周边建议；"
+                "核实事实使用 [来源编号]，建议写明是建议；缺资料的历史细节不要编造。不要在 introduction 中编造价格、时段、历史或交通。"
+            )
+            answer = await _model(prompt, json.dumps({"place": place.model_dump(), "checkedAt": checked_at, "sources": evidence}, ensure_ascii=False))
+            extracted = _clean_json(answer) if answer else {}
+            fields = {}
+            raw_fields = extracted.get("fields") if isinstance(extracted.get("fields"), dict) else {}
+            for field in FIELDS:
+                item = raw_fields.get(field)
+                if not isinstance(item, dict) or not isinstance(item.get("value"), str):
+                    continue
+                source_id = item.get("sourceId")
+                quote = item.get("evidence")
+                if not isinstance(source_id, int) or not 1 <= source_id <= len(sources) or not isinstance(quote, str) or len(quote.strip()) < 5:
+                    continue
+                source_text = sources[source_id-1]["content"] or sources[source_id-1]["summary"]
+                if _normalize(quote) not in _normalize(source_text):
+                    continue
+                # Reject a paraphrase that adds dates, prices, ages or phone numbers absent from its quoted evidence.
+                quoted_numbers = set(re.findall(r"\d+(?:\.\d+)?", quote))
+                if field == "openingHours":
+                    quoted_numbers.update(str(month) for word, month in (("january",1),("february",2),("march",3),("april",4),("may",5),("june",6),("july",7),("august",8),("september",9),("october",10),("november",11),("december",12)) if word in quote.lower())
+                value_numbers = set(re.findall(r"\d+(?:\.\d+)?", item["value"]))
+                if not value_numbers.issubset(quoted_numbers):
+                    item["value"] = quote.strip()
+                if field == "reservationUrl" and item["value"].strip() not in source_text:
+                    continue
+                if field == "reservation" and sources[source_id-1]["publishedAt"]:
+                    try:
+                        published = datetime.fromisoformat(sources[source_id-1]["publishedAt"])
+                        if _now() - published > timedelta(days=365):
+                            continue
+                    except ValueError:
+                        continue
+                if field == "todayNotice":
+                    published = sources[source_id-1]["publishedAt"] or ""
+                    if not published.startswith(checked_at[:10]):
+                        continue
+                fields[field] = {"value": item["value"].strip(), "sourceId": source_id, "evidence": quote.strip()}
+            introduction = extracted.get("introduction") if isinstance(extracted.get("introduction"), str) else ""
+            introduction = re.sub(r"\[来源(\d+)\]", lambda m: f"[{m.group(1)}]" if 1 <= int(m.group(1)) <= len(sources) else "（地点基本信息）", introduction)
+            if not introduction:
+                introduction = f"{place.name}：{place.description or place.category}。可结合地点位置与当天安排规划游览；具体开放和票务以以下来源为准。"
+            payload = {"status": "conflict" if extracted.get("conflict") else "verified" if len(fields) >= 3 else "partial" if fields else "not_found",
+                       "conflict": str(extracted.get("conflict") or ""), "checkedAt": checked_at,
+                       "fields": fields, "introduction": introduction, "sources": [{k: v for k, v in s.items() if k not in ("content", "summary", "score")} for s in sources],
+                       "stale": False, "cached": False}
+        with closing(_cache_connection()) as con:
+            con.execute("INSERT OR REPLACE INTO place_info_cache VALUES (?,?,?)", (key, json.dumps(payload, ensure_ascii=False), checked_at))
+            con.commit()
+        return payload
+    except (httpx.HTTPError, ValueError, TypeError, KeyError, sqlite3.Error) as exc:
+        if old:
+            return {**old, "status": "unavailable", "stale": True, "error": type(exc).__name__}
+        return {"status": "unavailable", "checkedAt": checked_at, "fields": {}, "sources": [], "introduction": "", "stale": False, "error": type(exc).__name__}

@@ -1,0 +1,11 @@
+**/node_modules/
+**/dist/
+**/__pycache__/
+**/.pytest_cache/
+**/.venv/
+**/.env
+**/*.sqlite3
+**/*.sqlite3-*
+backend/logs/*.log
+**/*.tsbuildinfo
+frontend/src/assets/hero.png
