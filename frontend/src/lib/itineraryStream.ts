@@ -8,6 +8,10 @@ export type ItineraryInput = {
   requirements: string;
   startDate: string | null;
   transport: string;
+  company: string;
+  pace: string;
+  budget: string;
+  interests: string[];
   lodging: string;
   lodgingLocation?: Point | null;
 };
@@ -18,6 +22,8 @@ export type ItineraryResult = {
   recommendedPlaces: Place[];
   routeSource: string;
   dayPlans: DayPlan[];
+  strategy?: { priorities: string[]; dayThemes: string[]; conflicts: string[]; reviewIssues: string[] };
+  metrics?: { transportMinutes: number[]; walkingMinutes: number[]; requiredCoverage: number };
 };
 
 type ProgressEvent =

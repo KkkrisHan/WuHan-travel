@@ -12,6 +12,8 @@ from langgraph.graph import END, START, StateGraph
 from .assistant import _model
 from .models import Candidate, DayPlan, Leg, Place, Snapshot, Stop
 from .places import FEATURED, calculate_route, search_places
+from .trip_intent import Router, allowed_modes
+from .trip_schedule import visit_minutes
 
 
 class PlanState(TypedDict, total=False):
@@ -79,8 +81,8 @@ def _time_label(start: datetime | None) -> str:
     return start.strftime("%H:%M") if start else "待核实"
 
 
-async def _build_day(places: list[Place], label: str, mode: str, pace: str) -> DayPlan:
-    visit = 75 if pace == "紧凑" else 120 if pace == "舒缓" else 90
+async def _build_day(places: list[Place], label: str, modes: tuple[str, ...], pace: str, budget: str) -> DayPlan:
+    router = Router(modes, budget)
     legs: list[Leg] = []
     stops: list[Stop] = []
     clock: datetime | None = datetime.combine(date.today(), time(9, 30))
@@ -88,14 +90,14 @@ async def _build_day(places: list[Place], label: str, mode: str, pace: str) -> D
     for index, place in enumerate(places):
         if index:
             origin = places[index - 1].location
-            route_mode = "walking" if mode == "mixed" and abs(origin.lng - place.location.lng) + abs(origin.lat - place.location.lat) < 0.018 else "transit" if mode == "mixed" else mode
-            route = await calculate_route(origin, place.location, route_mode)
-            legs.append(Leg(fromStopId=stops[-1].id, toStopId="", mode={"walking": "步行", "transit": "公共交通", "driving": "驾车"}[route_mode], **route))
+            route_mode, route = await router.choose(origin, place.location)
+            legs.append(Leg(fromStopId=stops[-1].id, toStopId="", mode=route_mode, **route))
             if route["minutes"] is None:
                 clock = None
                 warnings.append(f"{places[index - 1].name} → {place.name} 的交通耗时未知。")
             elif clock:
                 clock += timedelta(minutes=route["minutes"])
+        visit = visit_minutes(place, pace)
         stop = Stop(id=uuid4().hex, place=place, arrival=_time_label(clock), departure=_time_label(clock + timedelta(minutes=visit) if clock else None), minutes=visit, warning="开放与预约信息未核实")
         stops.append(stop)
         if legs and not legs[-1].toStopId:
@@ -104,7 +106,7 @@ async def _build_day(places: list[Place], label: str, mode: str, pace: str) -> D
             clock += timedelta(minutes=visit)
             if index == 1:
                 clock += timedelta(minutes=60)
-    return DayPlan(id=uuid4().hex, date=label, stops=stops, legs=legs, transportMinutes=sum(leg.minutes or 0 for leg in legs) if all(leg.minutes is not None for leg in legs) else None, sightseeingMinutes=len(stops) * visit, meals=["12:00 前后安排午餐，具体地点由用户确认"] if len(stops) > 1 else [], budgetNote="门票、餐饮和交通费用尚未核实；请按实际价格预留预算。", warnings=list(dict.fromkeys(warnings)))
+    return DayPlan(id=uuid4().hex, date=label, stops=stops, legs=legs, transportMinutes=sum(leg.minutes or 0 for leg in legs) if all(leg.minutes is not None for leg in legs) else None, sightseeingMinutes=sum(stop.minutes for stop in stops), meals=["12:00 前后安排午餐，具体地点由用户确认"] if len(stops) > 1 else [], budgetNote="门票、餐饮和交通费用尚未核实；请按实际价格预留预算。", warnings=list(dict.fromkeys(warnings)))
 
 
 async def create_candidates(state: PlanState) -> dict:
@@ -112,7 +114,7 @@ async def create_candidates(state: PlanState) -> dict:
     source = state["places"]
     days = snapshot.preferences.days
     per_day = min(4, max(1, (len(source) + days - 1) // days))
-    mode = "driving" if "驾" in snapshot.preferences.transport or "打车" in snapshot.preferences.transport else "mixed"
+    modes = allowed_modes(snapshot.preferences.transport, snapshot.preferences.requirements)
     base_date = date.fromisoformat(snapshot.preferences.startDate) if snapshot.preferences.startDate else None
     candidates = []
     for variant in range(2):
@@ -130,7 +132,7 @@ async def create_candidates(state: PlanState) -> dict:
             group = sequence[index * per_day:(index + 1) * per_day]
             label = (base_date + timedelta(days=index)).isoformat() if base_date else f"第 {index + 1} 天"
             if group:
-                day_plans.append(await _build_day(group, label, mode, snapshot.preferences.pace))
+                day_plans.append(await _build_day(group, label, modes, snapshot.preferences.pace, snapshot.preferences.budget))
             else:
                 day_plans.append(DayPlan(id=uuid4().hex, date=label, stops=[], legs=[], transportMinutes=0, sightseeingMinutes=0, meals=["自由安排"], budgetNote="费用未估算。", warnings=["地点数量不足，此日保留为空白日。请增加地点后重新规划。"]))
         candidates.append(Candidate(id=uuid4().hex, title=title, subtitle=subtitle, rationale=rationale, days=day_plans, warnings=state.get("warnings", [])))

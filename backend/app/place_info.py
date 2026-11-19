@@ -11,20 +11,21 @@ import time
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.robotparser import RobotFileParser
 
 import httpx
 
 from .assistant import _model
 from .config import settings
 from .models import Place
-from .request_context import request_id
+from .request_context import count_external, request_id
 
 FIELDS = ("openingHours", "todayNotice", "adultPrice", "discounts", "reservation", "reservationUrl", "phone", "address", "visitorNotes")
 SEARCH_ENDPOINT = "https://api.deepseek.com/v1/tools/search"
 FETCH_ENDPOINT = "https://api.deepseek.com/v1/tools/fetch"
 CACHE_TTL = timedelta(hours=12)
 FAILURE_CACHE_TTL = timedelta(minutes=5)
-PLACE_INFO_CACHE_VERSION = "v2"
+PLACE_INFO_CACHE_VERSION = "v3"
 MAX_SOURCES = 12
 MAX_FETCHES = 10
 MAX_PAGE_CHARS = 10000
@@ -33,6 +34,8 @@ CHAT_WEB_TIMEOUT = 22
 UPSTREAM_TIMEOUT = 14
 _FETCH_LIMIT = asyncio.Semaphore(4)
 _PLACE_LOCKS: dict[str, asyncio.Lock] = {}
+_ROBOTS_ALLOWED: dict[str, RobotFileParser | None] = {}
+_ROBOTS_LOCKS: dict[str, asyncio.Lock] = {}
 _LOG = logging.getLogger(__name__)
 
 
@@ -106,6 +109,14 @@ def _url_key(url: str) -> str:
         if not key.lower().startswith("utm_") and key.lower() not in tracking
     ]
     return urlunparse(parsed._replace(query=urlencode(query), fragment="")).rstrip("/").casefold()
+
+
+def _publisher_domain(url: str) -> str:
+    host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    parts = host.split(".")
+    if len(parts) >= 3 and parts[-2:] == ["gov", "cn"]:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
 
 
 def _official_host(place: Place, host: str) -> bool:
@@ -205,6 +216,7 @@ def _matches_place(place: Place, source: dict) -> bool:
 
 async def _post_json(client: httpx.AsyncClient, endpoint: str, headers: dict, body: dict) -> dict:
     for attempt in range(2):
+        count_external("deepseekSearchRequests" if endpoint == SEARCH_ENDPOINT else "deepseekFetchRequests" if endpoint == FETCH_ENDPOINT else "otherDeepseekToolRequests")
         response = await asyncio.wait_for(client.post(endpoint, headers=headers, json=body), timeout=UPSTREAM_TIMEOUT)
         if response.status_code == 429 or response.status_code >= 500:
             if attempt == 0:
@@ -218,11 +230,34 @@ async def _post_json(client: httpx.AsyncClient, endpoint: str, headers: dict, bo
     raise httpx.HTTPError("DeepSeek 请求重试失败")
 
 
+async def _robots_allows(client: httpx.AsyncClient, url: str) -> bool:
+    parsed = urlparse(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    lock = _ROBOTS_LOCKS.setdefault(origin, asyncio.Lock())
+    async with lock:
+        if origin not in _ROBOTS_ALLOWED:
+            try:
+                count_external("robotsChecks")
+                response = await asyncio.wait_for(client.get(origin + "/robots.txt"), timeout=4)
+                if response.status_code == 404:
+                    _ROBOTS_ALLOWED[origin] = None
+                elif response.status_code == 200:
+                    rules = RobotFileParser()
+                    rules.parse(response.text.splitlines())
+                    _ROBOTS_ALLOWED[origin] = rules
+                else:
+                    return False
+            except (httpx.HTTPError, asyncio.TimeoutError):
+                return False
+    rules = _ROBOTS_ALLOWED[origin]
+    return rules is None or rules.can_fetch("WuhanTravelKnowledgeBot", url)
+
+
 async def _search_one(client: httpx.AsyncClient, headers: dict, query: str, place: Place, errors: list[str] | None = None) -> list[dict]:
     started = time.monotonic()
     try:
         data = await _post_json(client, SEARCH_ENDPOINT, headers, {
-            "query": query, "count": 5, "need_content": True, "ori_question": f"查询武汉景点：{place.name}",
+            "query": query, "count": 5, "need_content": False, "ori_question": f"查询武汉景点：{place.name}",
         })
         results = data.get("results", [])
         if not isinstance(results, list):
@@ -240,6 +275,12 @@ async def _fetch_one(client: httpx.AsyncClient, headers: dict, source: dict) -> 
     async with _FETCH_LIMIT:
         started = time.monotonic()
         try:
+            # Search snippets come from the provider's index; explicit page
+            # fetching is gated by the site's robots policy when using HTTPX.
+            if hasattr(client, "get") and not await _robots_allows(client, source["url"]):
+                source["fetchStatus"] = "skipped"
+                source["fetchError"] = "robots_disallow_or_unavailable"
+                return
             data = await _post_json(client, FETCH_ENDPOINT, headers, {"url": source["url"]})
             content = data.get("content")
             if isinstance(content, str) and content.strip():
@@ -366,7 +407,7 @@ def _validate_fields(raw_fields: object, sources: list[dict], checked_at: str) -
         if field in {"openingHours", "adultPrice"} and not source["official"]:
             # A recent third-party claim is not enough for live hours/prices:
             # require a second independent, recent source with matching evidence.
-            primary_host = (urlparse(source["url"]).hostname or "").lower()
+            primary_host = _publisher_domain(source["url"])
             proofs = item.get("corroboratingEvidence")
             if not isinstance(proofs, list):
                 continue
@@ -377,7 +418,7 @@ def _validate_fields(raw_fields: object, sources: list[dict], checked_at: str) -
                 if not isinstance(other_id, int) or not 1 <= other_id <= len(sources) or other_id == source_id:
                     continue
                 other = sources[other_id - 1]
-                other_host = (urlparse(other["url"]).hostname or "").lower()
+                other_host = _publisher_domain(other["url"])
                 if not other_host or other_host == primary_host or not isinstance(other_quote, str):
                     continue
                 other_text = "\n".join((other["content"], other["summary"], other["snippet"]))

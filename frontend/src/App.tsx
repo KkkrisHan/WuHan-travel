@@ -290,12 +290,7 @@ function App() {
     setGenerateError("");
     setGenerateProgress({ percent: 0, label: "正在连接行程规划服务" });
     try {
-      const requirements = [
-        prefs.company ? `同行类型：${prefs.company}` : "",
-        `预算：${prefs.budget}；游玩节奏：${prefs.pace}`,
-        prefs.interests.length ? `兴趣：${prefs.interests.join("、")}` : "",
-        specialRequirements.trim(),
-      ].filter(Boolean).join("\n");
+      const requirements = specialRequirements.trim();
       const generated = await generateItineraryWithProgress({
         mustVisitPlaces: trip.pendingPlaces,
         people: prefs.people,
@@ -303,6 +298,10 @@ function App() {
         requirements,
         startDate: prefs.startDate || null,
         transport: prefs.transport,
+        company: prefs.company,
+        pace: prefs.pace,
+        budget: prefs.budget,
+        interests: prefs.interests,
         lodging: prefs.lodging || "",
         lodgingLocation: prefs.lodgingLocation || null,
       }, (percent, label) => setGenerateProgress({ percent, label }));
@@ -318,6 +317,8 @@ function App() {
         mustVisitPlaces: structuredClone(trip.pendingPlaces),
         recommendedPlaces: generated.recommendedPlaces,
         dayPlans: generated.dayPlans,
+        strategy: generated.strategy,
+        metrics: generated.metrics,
         createdAt: new Date().toISOString(),
       };
       await mutateTrip(trip.id, "生成当前行程", (draft) => {
@@ -414,7 +415,7 @@ function App() {
                   day.legs = [];
                   day.transportMinutes = null;
                   day.sightseeingMinutes = day.stops.reduce(
-                    (sum, stop) => sum + stop.minutes,
+                    (sum, stop) => sum + (stop.place.category === "餐饮服务" ? 0 : stop.minutes),
                     0,
                   );
                   day.warnings.push("AI 修改后，交通时间需重新核对。");
@@ -642,7 +643,7 @@ function App() {
         minutes: 90,
         warning: "手动加入后，开放与路线时间待核实",
       });
-      target.sightseeingMinutes += 90;
+      if (place.category !== "餐饮服务") target.sightseeingMinutes += 90;
       target.transportMinutes = null;
       target.legs = [];
       target.warnings = [
@@ -662,7 +663,7 @@ function App() {
       target.legs = [];
       target.transportMinutes = null;
       target.sightseeingMinutes = target.stops.reduce(
-        (sum, stop) => sum + stop.minutes,
+        (sum, stop) => sum + (stop.place.category === "餐饮服务" ? 0 : stop.minutes),
         0,
       );
       target.warnings = [

@@ -204,6 +204,7 @@ textarea:focus-visible,
 }
 .toast {
   position: fixed;
+  pointer-events: none;
   right: 22px;
   bottom: 22px;
   z-index: 100;
@@ -219,6 +220,7 @@ textarea:focus-visible,
   font-size: 12px;
 }
 .toast button {
+  pointer-events: auto;
   border: 0;
   background: none;
   color: white;

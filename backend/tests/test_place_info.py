@@ -39,6 +39,16 @@ class FakeAsyncClient:
 
 
 class PlaceInfoTest(unittest.IsolatedAsyncioTestCase):
+    async def test_robots_disallow_skips_page_fetch(self):
+        place_info._ROBOTS_ALLOWED.clear()
+        async def handle(request):
+            return httpx.Response(200, text="User-agent: *\nDisallow: /private")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            allowed = await place_info._robots_allows(client, "https://example.org/private/hours")
+            public = await place_info._robots_allows(client, "https://example.org/public/hours")
+        self.assertFalse(allowed)
+        self.assertTrue(public)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.db = str(Path(self.temp.name) / "place-info.sqlite3")
@@ -144,7 +154,7 @@ class PlaceInfoTest(unittest.IsolatedAsyncioTestCase):
             result = await place_info.get_place_info(self.place)
 
         self.assertEqual(len(fake_client.search_calls), 6)
-        self.assertTrue(all(call["need_content"] is True for call in fake_client.search_calls))
+        self.assertTrue(all(call["need_content"] is False for call in fake_client.search_calls))
         self.assertGreaterEqual(len(fake_client.fetch_calls), 2)
         self.assertEqual(result["status"], "conflict")
         self.assertEqual(result["fields"]["openingHours"]["sourceId"], 1)

@@ -1,310 +1,239 @@
-"""Build complete, route-backed itinerary documents from verified POI records."""
+"""One-pass map-grounded itinerary: collect facts, decide once, schedule once."""
 from __future__ import annotations
 
 import asyncio
-import json
-import math
-import re
-from datetime import date, datetime, timedelta
+import logging
+import time
+from datetime import date
 from typing import Awaitable, Callable
-from uuid import uuid4
 
-import httpx
 from fastapi import HTTPException
 
 from .assistant import _model
 from .config import settings
-from .models import Place, Point, DayPlan, Stop, Leg
-from .places import calculate_route, search_places
-from .opening_hours import collect_opening_hours, opening_window, preferred_time, closed_for_date
+from .models import Place, Point
+from .one_pass_plan import decide_days_once
+from .opening_hours import collect_opening_hours
+from .places import search_places, verify_required_place
+from .request_context import request_metrics
+from .trip_intent import Router, TripIntent, allowed_modes, meters
+from .trip_schedule import schedule_day, validate
 
-
-# These are generic POI categories, not unambiguous named destinations.
-_GENERIC_POI_NAMES = {
-    "口袋公园", "公园", "街心公园", "社区公园", "小游园",
-    "游园", "广场", "景点", "景区", "观景点", "休息亭",
-}
-
-
-def _is_specific_destination(place: Place) -> bool:
-    name = re.sub(r"\s+", "", place.name).strip()
-    return (
-        bool(name)
-        and name not in _GENERIC_POI_NAMES
-        and bool(place.placeId.strip())
-        and place.location is not None
-    )
-
-
-def _meters(a: Point, b: Point) -> float:
-    return math.hypot((a.lng-b.lng)*95000, (a.lat-b.lat)*111000)
-
-
-def _route_text(route: dict, mode: str) -> str:
-    label = {"walking": "步行", "driving": "驾车", "transit": "公交"}[mode]
-    if route.get("minutesMin") is not None:
-        return f"预计{label}约 {route['minutesMin']}–{route['minutesMax']} 分钟（距离估算，非实时路线）"
-    return f"预计{label}约 {route['minutes']} 分钟（高德路线规划，实际等待与拥堵另计）"
+LOG = logging.getLogger(__name__)
 
 
 async def _lodging_point(name: str) -> Point:
-    found, _ = await search_places(name)
-    if found:
-        return found[0].location
-    async with httpx.AsyncClient(timeout=12) as client:
-        response = await client.get("https://restapi.amap.com/v3/geocode/geo", params={"key": settings.amap_web_service_key, "address": name, "city": "武汉"})
-        response.raise_for_status()
-        data = response.json()
-    try:
-        lng, lat = map(float, data["geocodes"][0]["location"].split(","))
-        return Point(lng=lng, lat=lat)
-    except (KeyError, IndexError, ValueError, TypeError) as exc:
-        raise HTTPException(422, "无法定位住宿地点，请输入更完整的武汉酒店名称或地址") from exc
+    matches, _ = await search_places(name)
+    if matches:
+        return matches[0].location
+    raise HTTPException(422, "无法定位住宿地点，请提供更完整的酒店名称或地图位置")
+
+
+def _unique(places: list[Place]) -> list[Place]:
+    seen = set()
+    result = []
+    for place in places:
+        name = "".join(place.name.split()).lower()
+        if place.placeId and name and name not in seen:
+            result.append(place)
+            seen.add(name)
+    return result
+
+
+async def _route_hints(required: list[Place], hotel: Point | None, router: Router) -> list[dict]:
+    """Use available real route data with a fixed, small preplanning budget."""
+    anchors = [(place.name, place.location) for place in required[:5]]
+    if hotel:
+        anchors.append(("住宿", hotel))
+    pairs = [(a, p, b, q) for i, (a, p) in enumerate(anchors)
+             for b, q in anchors[i + 1:]]
+    hints = [{"from": a, "to": b, "straightLineMeters": round(meters(p, q))}
+             for a, p, b, q in pairs]
+    if not pairs:
+        return hints
+
+    async def fetch(index: int, p: Point, q: Point):
+        try:
+            mode, route = await router.choose(p, q)
+            return index, mode, route
+        except HTTPException:
+            return index, None, None
+
+    tasks = [asyncio.create_task(fetch(i, p, q))
+             for i, (_, p, _, q) in enumerate(pairs)]
+    done, pending = await asyncio.wait(tasks, timeout=9)
+    for task in pending:
+        task.cancel()
+    for task in done:
+        if task.cancelled() or task.exception():
+            continue
+        index, mode, route = task.result()
+        if mode and route and "估算" not in route.get("source", ""):
+            hints[index].update({"mode": mode, "minutes": route["minutes"],
+                                 "walkingMinutes": route.get("walkingMinutes")})
+    return hints
 
 
 async def build_itinerary(request, progress: Callable[[int, str], Awaitable[None]] | None = None) -> dict:
+    started = time.monotonic()
+    counters: dict[str, int] = {}
+    request_metrics.set(counters)
+
     async def report(percent: int, label: str) -> None:
+        LOG.info("one_pass_phase percent=%d elapsed_ms=%d label=%s",
+                 percent, round((time.monotonic() - started) * 1000), label)
         if progress:
             await progress(percent, label)
 
-    await report(5, "校验旅行设置")
+    await report(5, "整理用户输入与必须满足的要求")
     if not settings.amap_web_service_key:
         raise HTTPException(503, "未配置高德 Web 服务密钥，无法核实推荐地点")
     try:
         first_date = date.fromisoformat(request.startDate) if request.startDate else None
     except ValueError as exc:
         raise HTTPException(422, "开始日期格式无效") from exc
-    mode = "driving" if any(word in request.transport for word in ("打车", "驾车", "出租")) or "多打车" in request.requirements else "transit" if "公交" in request.transport else "walking"
     required = list({p.placeId: p for p in request.mustVisitPlaces}.values())
-    # Search POIs, not prose: only map records may become stops.
-    queries = ["武汉 景点", "武汉 博物馆 公园", "武昌 首义 景点", "东湖 景点", "汉口 景点", "汉阳 景点"]
-    if required:
-        queries.append(required[0].name + " 附近 景点")
-    pool: list[Place] = []
-    await report(15, "查询真实景点与地理位置")
-    search_results = await asyncio.gather(*(search_places(query) for query in queries), return_exceptions=True)
-    for result in search_results:
-        if not isinstance(result, BaseException):
-            pool.extend(result[0])
-    if not pool and not required:
-        raise HTTPException(502, "高德地点搜索未返回可用结果")
-    used_names = {p.name.strip().lower() for p in required}
-    unique: list[Place] = []
-    for place in pool:
-        name = place.name.strip().lower()
-        if (_is_specific_destination(place)
-            and name not in used_names and place.placeId not in {p.placeId for p in unique}
-            and place.category in ("风景名胜", "科教文化服务", "历史地标", "自然风光", "博物馆", "街区")
-            and not any(word in place.name for word in ("暂停开放", "停车场", "售票处", "服务中心", "驿站"))
-            and place.name not in ("观景点", "休息亭") and "-" not in place.name
-            and "休息亭" not in place.name
-            and not any(place.name.startswith(p.name) or p.name.startswith(place.name) for p in required)):
-            used_names.add(name)
-            unique.append(place)
-    anchors = [p.location for p in required] or [Point(lng=114.3055, lat=30.5928)]
-    unique.sort(key=lambda p: min(_meters(p.location, anchor) for anchor in anchors))
-    await report(34, f"已查询 {len(pool)} 个地点，筛选候选景点")
-    # AI ranks a bounded set of real POIs; unrecognized IDs are discarded.
-    preference = await _model(
-        '你是武汉行程顾问。从提供的真实高德 POI 中选择适合要求和地理邻近性的地点，只返回 JSON 数组，元素为 placeId，不得创造地点。最多选指定数量。',
-        json.dumps({"days": request.days, "requirements": request.requirements, "transport": request.transport,
-                    "mustVisit": [p.name for p in required], "count": max(request.days*2-len(required), request.days),
-                    "candidates": [{"placeId": p.placeId, "name": p.name, "category": p.category, "lng": p.location.lng, "lat": p.location.lat} for p in unique[:25]]}, ensure_ascii=False),
-    ) if unique else None
-    await report(48, "结合旅行偏好挑选景点")
-    preferred_ids: list[str] = []
-    if preference:
-        try:
-            decoded = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", preference.strip()))
-            if isinstance(decoded, list):
-                preferred_ids = [x for x in decoded if isinstance(x, str)]
-        except ValueError:
-            pass
-    lookup = {p.placeId: p for p in unique}
-    preferred = [lookup[pid] for pid in preferred_ids if pid in lookup]
-    recommendations: list[Place] = []
-    for p in preferred + unique:
-        if min(_meters(p.location, anchor) for anchor in anchors) > 18000:
-            continue
-        if any(p.name.startswith(x.name) or x.name.startswith(p.name) for x in recommendations):
-            continue
-        if any(_meters(p.location, x.location) < 250 for x in recommendations):
-            continue
-        if p.placeId not in {x.placeId for x in recommendations}:
-            recommendations.append(p)
-        if len(required) + len(recommendations) >= request.days * 2:
-            break
-    selected = required + recommendations
-    region_groups: list[list[Place]] | None = None
-    if request.days == 4 and len(required) == 2 and _meters(required[0].location, required[1].location) < 2000:
-        # Four distinct Wuhan districts, with each day's stops chosen from live POIs.
-        region_groups = [required[:]]
-        regional = []
-        for center in (Point(lng=114.38, lat=30.56), Point(lng=114.293, lat=30.58), Point(lng=114.27, lat=30.55)):
-            choices = [p for p in unique if p.placeId not in {x.placeId for x in regional + required}
-                       and _meters(p.location, center) < 4500
-                       and all(_meters(p.location, x.location) >= 350 for x in regional + required)]
-            choices.sort(key=lambda p: _meters(p.location, center) - (250 if p.placeId in preferred_ids else 0)
-                         + (700 if any(w in p.name for w in ("旧址", "纪念碑", "鼓楼洞", "观景点")) else 0))
-            pair = []
-            for p in choices:
-                if all(_meters(p.location, x.location) >= 350 and not (p.name.startswith(x.name) or x.name.startswith(p.name)) for x in pair):
-                    pair.append(p)
-                if len(pair) == 2:
-                    break
-            if len(pair) < 2:
-                region_groups = None
-                break
-            regional.extend(pair)
-            region_groups.append(pair)
-        if region_groups:
-            recommendations = regional
-            selected = required + recommendations
-    if len(selected) < request.days:
-        raise HTTPException(502, "可用的真实地点不足以覆盖所选天数，请缩短行程或补充必去地点")
-    # Pair nearby stops before ordering days so a day does not cross the city merely
-    # because a global nearest-neighbour path crossed a river at a day boundary.
-    remaining = selected[:]
-    day_places: list[list[Place]] = region_groups or []
-    while remaining and not region_groups:
-        group_size = math.ceil(len(remaining) / (request.days - len(day_places)))
-        if not day_places and required:
-            first = required[0]
-        elif len(remaining) > 1:
-            first = min(remaining, key=lambda a: min(_meters(a.location, b.location) for b in remaining if b is not a))
-        else:
-            first = remaining[0]
-        remaining.remove(first)
-        group = [first]
-        while remaining and len(group) < group_size:
-            nxt = min(remaining, key=lambda p: min(_meters(p.location, x.location) for x in group))
-            remaining.remove(nxt)
-            group.append(nxt)
-        day_places.append(group)
-    if len(day_places) != request.days:
-        raise HTTPException(502, "行程分天失败")
-    if len(day_places) > 1:
-        ordered_groups = [day_places.pop(0)]
-        while day_places:
-            previous = ordered_groups[-1][-1].location
-            nxt = min(day_places, key=lambda group: min(_meters(previous, p.location) for p in group))
-            day_places.remove(nxt)
-            ordered_groups.append(nxt)
-        day_places = ordered_groups
-    if any(not items for items in day_places):
-        raise HTTPException(502, "行程分天失败")
-    await report(60, "已完成行程分天，准备交通规划")
-    await report(61, "核实景点开放时间并优化访问时段")
-    opening_hours = await collect_opening_hours(selected)
-    for group in day_places:
-        # Closed-earlier venues should precede late-opening and evening requests.
-        def visit_rank(place: Place) -> tuple[int, int]:
-            hours = opening_window(opening_hours.get(place.placeId))
-            preference = preferred_time(request.requirements, place.name)
-            if preference == "night" and (hours is None or hours.end >= 19 * 60):
-                return (2, hours.end if hours else 24 * 60)
-            if preference == "morning" or (preference == "night" and hours is not None):
-                return (0, hours.end if hours else 24 * 60)
-            return (1, hours.end if hours else 24 * 60)
-        group.sort(key=visit_rank)
-    lodging = request.lodging.strip() if request.lodging else ""
-    lodging_point = getattr(request, "lodgingLocation", None) or (await _lodging_point(lodging) if lodging else None)
-    lines = [f"# 武汉{request.days}日旅行计划", "", "## 旅行概览", "",
-             f"- **日期**：{first_date.isoformat() if first_date else '未指定'}" + (f" 至 {(first_date+timedelta(days=request.days-1)).isoformat()}" if first_date else ""),
-             f"- **人数**：{request.people} 人", f"- **节奏与要求**：{request.requirements or '按舒缓节奏安排'}",
-             f"- **交通偏好**：{request.transport}", f"- **住宿/出发地**：{lodging or '未提供；每天从首个地点开始计算路线'}", "",
-             "> 开放、票价与预约请以地点详情中的最新来源和出行当日公告为准。高德路线时间是规划值，不含等车与临时拥堵。", ""]
-    required_ids = {p.placeId for p in required}
-    seen_ids: set[str] = set()
-    route_sources: set[str] = set()
-    structured_days: list[dict] = []
-    for day_index, items in enumerate(day_places):
-        await report(62 + round(day_index / request.days * 31), f"规划第 {day_index + 1}/{request.days} 天路线")
-        day_date = (first_date + timedelta(days=day_index)).isoformat() if first_date else f"第{day_index+1}天（日期未定）"
-        lines += [f"## Day {day_index+1} · {day_date}", "", f"### 当日主题：{items[0].category}与邻近区域", "",
-                  "| 时段 | 地点与类别 | 安排 | 交通 |", "| --- | --- | --- | --- |"]
-        current_time = datetime.combine(date.today(), datetime.strptime("09:00", "%H:%M").time())
-        day_stop_ids = [uuid4().hex for _ in items]
-        day_stops: list[Stop] = []
-        day_legs: list[Leg] = []
-        day_transport_minutes = 0
-        day_warnings: list[str] = []
-        actual_date = first_date + timedelta(days=day_index) if first_date else None
-        if lodging_point:
-            route = await calculate_route(lodging_point, items[0].location, mode)
-            route_sources.add(route["source"])
-            lines.append(f"| 出发 | {lodging} | 住宿出发 | {_route_text(route, mode)} |")
-            current_time += timedelta(minutes=route["minutes"])
-        for index, place in enumerate(items):
-            if place.placeId in seen_ids:
-                raise HTTPException(502, "地点重复分配，行程未保存")
-            seen_ids.add(place.placeId)
-            stop_minutes = 20 if any(word in place.name for word in ("租赁点", "售票处", "服务中心")) or place.category == "生活服务" else 90 if "慢" in request.requirements or "舒缓" in request.requirements else 75
-            previous_service = index > 0 and (items[index-1].category == "生活服务" or "租赁点" in items[index-1].name)
-            if index and stop_minutes > 30 and not previous_service and (current_time.hour >= 12 or index == len(items)-1) and not any("午餐" in row for row in lines[-8:]):
-                lunch_start = max(current_time, datetime.combine(date.today(), datetime.strptime("12:00", "%H:%M").time()))
-                lunch_end = lunch_start + timedelta(minutes=75)
-                lines.append(f"| 午餐与休息 | {items[index-1].name}周边 | {lunch_start:%H:%M}–{lunch_end:%H:%M}；就近用餐和休息 | 步行或短途移动，未指定餐厅 |")
-                current_time = lunch_end
-            opening_label = opening_hours.get(place.placeId)
-            hours = opening_window(opening_label)
-            preference = preferred_time(request.requirements, place.name)
-            issue: str | None = None
-            if opening_label and closed_for_date(opening_label, actual_date):
-                issue = f"{place.name} 在该日可能闭馆（{opening_label}），请调整日期。"
-            if preference == "night":
-                if hours and hours.end <= 18 * 60:
-                    issue = f"{place.name} 核实的常规开放时间为 {opening_label}，不满足夜间游览要求，已尝试安排日间。"
-                else:
-                    current_time = max(current_time, current_time.replace(hour=18, minute=0))
-                    if not hours:
-                        issue = f"{place.name} 的夜间开放时间未核实，晚间安排仅为待确认计划。"
-            elif preference == "afternoon":
-                current_time = max(current_time, current_time.replace(hour=12, minute=0))
-            if hours and (current_time.hour * 60 + current_time.minute) < hours.start:
-                current_time = current_time.replace(hour=hours.start // 60, minute=hours.start % 60)
-            arrival = current_time
-            departure = arrival + timedelta(minutes=stop_minutes)
-            if hours and departure.hour * 60 + departure.minute > hours.end:
-                issue = f"{place.name} 预计 {arrival:%H:%M}–{departure:%H:%M} 游览超出核实的开放时间（{opening_label}），需要调整当天路线。"
-            if issue:
-                day_warnings.append(issue)
-            marker = "【必去】" if place.placeId in required_ids else "【AI推荐】"
-            phase = "上午" if arrival.hour < 12 else "下午" if arrival.hour < 18 else "晚间"
-            action = "停留办理或查看约" if stop_minutes == 20 else "建议游览约"
-            hours_text = f"；开放时间：{opening_label}" if opening_label else "；开放时间待核实"
-            lines.append(f"| {phase} | {marker}{place.name}（{place.category}） | {arrival:%H:%M}–{departure:%H:%M}；{action} {stop_minutes} 分钟{hours_text} | {('首站' if index == 0 else transport_text)} |")
-            day_stops.append(Stop(id=day_stop_ids[index], place=place, arrival=f"{arrival:%H:%M}", departure=f"{departure:%H:%M}", minutes=stop_minutes, warning=issue))
-            current_time = departure
-            if index < len(items)-1:
-                leg_mode = "walking" if _meters(place.location, items[index+1].location) < 800 else mode
-                route = await calculate_route(place.location, items[index+1].location, leg_mode)
-                route_sources.add(route["source"])
-                day_legs.append(Leg(fromStopId=day_stop_ids[index], toStopId=day_stop_ids[index+1], mode=leg_mode, minutes=route["minutes"], minutesMin=route.get("minutesMin"), minutesMax=route.get("minutesMax"), distanceMeters=route.get("distanceMeters"), source=route["source"], polyline=route.get("polyline") or []))
-                day_transport_minutes += route["minutes"]
-                transport_text = _route_text(route, leg_mode)
-                current_time += timedelta(minutes=route["minutes"])
-        if not any("午餐" in row for row in lines[-len(items)-2:]):
-            lunch_start = max(current_time, datetime.combine(date.today(), datetime.strptime("12:00", "%H:%M").time()))
-            lunch_end = lunch_start + timedelta(minutes=75)
-            lines.append(f"| 午餐与休息 | {items[-1].name}周边 | {lunch_start:%H:%M}–{lunch_end:%H:%M}；就近用餐和休息 | 就近安排 |")
-        lines.append("| 晚间 | 自由活动 | 休息或在最后一站周边自由探索，不追加固定景点 | 自行决定 |")
-        if lodging_point:
-            route = await calculate_route(items[-1].location, lodging_point, mode)
-            route_sources.add(route["source"])
-            lines.append(f"| 返回住宿 | {lodging} | 当日结束后返回 | {_route_text(route, mode)} |")
-        lines += ["", "### 当日路线", "", " → ".join(p.name for p in items) + "。顺序结合地理位置、开放时间和特定时段偏好安排，路线冲突需以核实信息为准。", "",
-                  "### 注意事项", "", "- 未核实开放时间的地点不得视为已经确认营业。",
-                  "- 交通时间为高德规划值或标明区间的距离估算；实际打车等待、路况和排队需另留弹性。"]
-        lines += ["- **时间冲突**：" + warning for warning in day_warnings]
-        lines.append("")
-        await report(62 + round((day_index + 1) / request.days * 31), f"第 {day_index + 1} 天路线已完成")
-        structured_days.append(DayPlan(id=uuid4().hex, date=day_date, stops=day_stops, legs=day_legs, transportMinutes=day_transport_minutes, sightseeingMinutes=sum(stop.minutes for stop in day_stops), meals=["午餐与休息"], budgetNote="费用以当天官方票价与实际交通支出为准", warnings=["尚未核实的地点开放、预约和交通时间请在出发前确认。", *day_warnings]).model_dump())
-    missing = [p.name for p in required if p.placeId not in seen_ids]
-    if missing or len(day_places) != request.days or any(not day for day in day_places):
-        raise HTTPException(502, "行程完整性校验失败：" + "、".join(missing))
-    await report(97, "核对全部必去地点并整理行程")
-    lines += ["## 行程结束与核查清单", "", "- 出发前再次确认景区当天公告、预约入口与票价。", "- 高峰期给餐饮、打车与过江交通预留额外时间。", ""]
-    return {"title": f"武汉{request.days}日旅行计划", "markdown": "\n".join(lines),
-            "recommendedPlaces": [p.model_dump() for p in recommendations], "routeSource": "；".join(sorted(route_sources)),
-            "dayPlans": structured_days}
+    intent = TripIntent(
+        days=request.days, people=request.people,
+        company=getattr(request, "company", ""),
+        pace=getattr(request, "pace", "适中"),
+        budget=getattr(request, "budget", "灵活"),
+        interests=getattr(request, "interests", []),
+        requirements=request.requirements,
+        modes=allowed_modes(request.transport, request.requirements),
+        must_visit=[p.name for p in required],
+        start_date=request.startDate,
+        lodging=request.lodging.strip(),
+    )
+
+    # Search once, without requesting a preliminary AI strategy. All provided
+    # preferences are passed to the single planning model call later.
+    await report(18, "检索高德真实地点")
+    # Verify user supplied places before they enter the model candidate pool.
+    # The source label and browser supplied coordinates are never proof of identity.
+    required = list(await asyncio.gather(*(verify_required_place(p) for p in required)))
+    required = list({p.placeId: p for p in required}.values())
+    intent.must_visit = [p.name for p in required]
+    queries = list(dict.fromkeys(
+        ["武汉 景点"]
+        + [f"武汉 {interest}" for interest in intent.interests]
+        + (["武汉 特色美食 餐厅"] if "美食" in intent.interests else [])
+    ))[:8]
+    search_limit = asyncio.Semaphore(3)
+
+    async def search_one(query: str):
+        async with search_limit:
+            return await asyncio.wait_for(search_places(query), timeout=13)
+
+    searches = await asyncio.gather(*(search_one(q) for q in queries),
+                                    return_exceptions=True)
+    for query, result in zip(queries, searches):
+        if isinstance(result, BaseException):
+            LOG.warning("candidate_search_failed query=%s error=%s", query, type(result).__name__)
+    batches = [result[0] for result in searches if not isinstance(result, BaseException)]
+    interleaved = [batch[index] for index in range(max(map(len, batches), default=0))
+                   for batch in batches if index < len(batch)]
+    required_names = [p.name for p in required]
+
+    def useful(place: Place) -> bool:
+        if place.placeId in {p.placeId for p in required}:
+            return True
+        if any(place.name.startswith(name) for name in required_names):
+            return False
+        if any(token in place.name for token in (
+            "停车场", "公厕", "售票处", "服务中心", "出入口", "检票口", "考试中心"
+        )):
+            return False
+        if "-" in place.name and place.category != "餐饮服务":
+            return False
+        if place.category == "科教文化服务" and not any(
+            token in place.description + place.name
+            for token in ("博物馆", "展览馆", "科技馆", "艺术馆", "美术馆", "文化馆")
+        ):
+            return False
+        return place.category in (
+            "风景名胜", "餐饮服务", "购物服务", "科教文化服务",
+            "公园广场", "历史地标", "自然风光", "博物馆", "街区"
+        )
+
+    # Keep the model context and metadata lookup bounded. Mandatory places
+    # are always first, regardless of the search-results ranking.
+    cap = max(12, min(25, intent.days * 3 + 5, 25))
+    pool = _unique([*required, *(p for p in interleaved if useful(p))])[:cap]
+    if len(pool) < intent.days:
+        raise HTTPException(422, "真实地点不足以安排指定天数；请减少天数或调整兴趣")
+    await report(38, f"已找到 {len(pool)} 个候选地点，预先核实事实")
+    hotel = (getattr(request, "lodgingLocation", None)
+             or (await _lodging_point(intent.lodging) if intent.lodging else None))
+    router = Router(intent.modes, intent.budget)
+
+    # The AI makes a single decision only AFTER opening-hours evidence and
+    # available hotel/mandatory route hints have been gathered.
+    opening, hints = await asyncio.gather(
+        collect_opening_hours(pool, max_wait=16, visit_date=first_date, visit_days=intent.days,
+                              required_ids={p.placeId for p in required}),
+        _route_hints(required, hotel, router),
+    )
+    await report(58, "根据完整要求一次性决定逐日路线")
+    groups, details = await decide_days_once(
+        intent, required, pool, opening, hotel, hints, _model
+    )
+    counters["fullPlanningDecisions"] = 1
+    selected = list({p.placeId: p for group in groups for p in group}.values())
+
+    # Only timetable computation follows the one AI decision. No group swaps,
+    # optional-stop removals, missing-place insertion, model retries or review
+    # feedback loops are permitted.
+    await report(74, "按唯一规划方案计算各天交通与时间")
+    all_stops = [place for group in groups for place in group]
+    results = await asyncio.gather(*(
+        schedule_day(index, group, intent, details, opening, hotel, router,
+                     first_date, _soft=False, all_places=all_stops,
+                     exact_order=True)
+        for index, group in enumerate(groups)
+    ))
+    days = [result[0] for result in results]
+    sections = [line for _, lines, _ in results for line in lines]
+    walk_minutes = [result[2] for result in results]
+
+    header = [
+        f"# 武汉{intent.days}日旅行计划", "", "## 旅行策略", "",
+        *[f"- {priority}" for priority in intent.priorities],
+        *[f"- 待协调要求：{conflict}" for conflict in intent.conflicts],
+        "", f"日期：{first_date.isoformat() if first_date else '未指定'}；人数：{intent.people}；"
+        f"节奏：{intent.pace}；预算：{intent.budget}。", "",
+    ]
+    markdown = "\n".join([
+        *header, *sections, "## 出行说明", "",
+        "地点顺序来自单次 AI 规划，时间与交通由地图路线计算；"
+        "开放时段未经核实的地点不视为确认开放。", "",
+    ])
+    await report(91, "校验必去地点、时段、路线与表格一致性")
+    issues = validate(days, required, intent.modes, markdown)
+    if issues:
+        raise HTTPException(422, "单次规划未通过约束校验（未自动修补）："
+                            + "；".join(issues))
+    recommended = [p for p in selected if p.placeId not in {r.placeId for r in required}]
+    await report(97, "行程已通过校验")
+    LOG.info("one_pass_completed days=%d stops=%d transport=%s walks=%s",
+             len(days), len(selected), [day.transportMinutes for day in days], walk_minutes)
+    return {
+        "title": f"武汉{intent.days}日旅行计划",
+        "markdown": markdown,
+        "recommendedPlaces": [p.model_dump() for p in recommended],
+        "routeSource": "高德地图路线规划或标明的距离估算",
+        "dayPlans": [day.model_dump() for day in days],
+        "strategy": {
+            "priorities": intent.priorities, "dayThemes": intent.day_themes,
+            "hardConstraints": intent.hard_constraints, "softGoals": intent.soft_goals,
+            "avoid": intent.avoid, "conflicts": intent.conflicts,
+            "reviewIssues": [],
+        },
+        "metrics": {
+            "transportMinutes": [day.transportMinutes for day in days],
+            "walkingMinutes": walk_minutes, "requiredCoverage": 1.0,
+            "elapsedSeconds": round(time.monotonic() - started, 2),
+            "networkCalls": counters.copy(),
+            "routeCacheEntries": len(router.cache),
+        },
+    }

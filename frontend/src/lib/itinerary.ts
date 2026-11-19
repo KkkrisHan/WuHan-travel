@@ -27,7 +27,7 @@ export function recoverItinerary(document: GeneratedItinerary): DayPlan[] {
     if (stops.length) {
       days.push({
         id: crypto.randomUUID(), date, stops, legs: [], transportMinutes: null,
-        sightseeingMinutes: stops.reduce((sum, stop) => sum + stop.minutes, 0),
+        sightseeingMinutes: stops.reduce((sum, stop) => sum + (stop.place.category === "餐饮服务" ? 0 : stop.minutes), 0),
         meals: ["午餐与休息"], budgetNote: "以最新官方报价和实际交通费用为准",
         warnings: ["从旧版已生成行程恢复；地图交通路径与耗时请重新核对。"],
       });

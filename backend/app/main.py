@@ -191,6 +191,10 @@ class ItineraryRequest(BaseModel):
     requirements: str = Field(default="", max_length=2000)
     startDate: str | None = None
     transport: str = "步行与公共交通"
+    company: str = ""
+    pace: str = "适中"
+    budget: str = "灵活"
+    interests: list[str] = Field(default_factory=list)
     lodging: str = Field(default="", max_length=120)
     lodgingLocation: Point | None = None
 
@@ -219,10 +223,12 @@ async def generate_itinerary_stream(request: ItineraryRequest):
 
         async def worker():
             try:
-                result = await build_itinerary(request, progress=progress)
+                result = await asyncio.wait_for(build_itinerary(request, progress=progress), timeout=150)
                 await queue.put({"type": "complete", "percent": 100, "label": "行程生成完成", "result": result})
             except HTTPException as exc:
                 await queue.put({"type": "error", "detail": str(exc.detail)})
+            except asyncio.TimeoutError:
+                await queue.put({"type": "error", "detail": "规划超过 150 秒，请稍后重试"})
             except Exception:
                 logger.exception("itinerary stream failed")
                 await queue.put({"type": "error", "detail": "行程生成失败，请稍后重试"})

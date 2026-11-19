@@ -39,6 +39,8 @@ export type Leg = {
   minutesMin?: number | null;
   minutesMax?: number | null;
   distanceMeters: number | null;
+  walkingMinutes?: number | null;
+  transfers?: number | null;
   source: string;
   polyline: Point[];
 };
@@ -91,6 +93,8 @@ export type GeneratedItinerary = {
   recommendedPlaces: Place[];
   createdAt: string;
   dayPlans?: DayPlan[];
+  strategy?: { priorities: string[]; dayThemes: string[]; conflicts: string[]; reviewIssues: string[] };
+  metrics?: { transportMinutes: number[]; walkingMinutes: number[]; requiredCoverage: number };
 };
 export type TripVersion = {
   id: string;

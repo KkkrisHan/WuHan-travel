@@ -2,6 +2,7 @@ import unittest
 from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+from fastapi import HTTPException
 
 from app.models import Place, Point
 from app.itinerary_doc import build_itinerary
@@ -41,13 +42,14 @@ class ItineraryOpeningTests(unittest.IsolatedAsyncioTestCase):
         request = SimpleNamespace(mustVisitPlaces=[place], days=1, people=1, requirements="一定要在晚上去一次黄鹤楼", startDate="2026-11-22", transport="步行", lodging="", lodgingLocation=None)
         with (
             patch("app.itinerary_doc.settings.amap_web_service_key", "test"),
+            patch("app.itinerary_doc.verify_required_place", new=AsyncMock(side_effect=lambda p: p)),
             patch("app.itinerary_doc.search_places", new=AsyncMock(return_value=([], "高德"))),
-            patch("app.itinerary_doc._model", new=AsyncMock(return_value=None)),
+            patch("app.itinerary_doc._model", new=AsyncMock(return_value='{"days":[[{"placeId":"yellow","experience":"参观黄鹤楼","timeWindow":"evening"}]]}')),
             patch("app.itinerary_doc.collect_opening_hours", new=AsyncMock(return_value={"yellow": "08:30-17:30"})),
         ):
-            result = await build_itinerary(request)
-        self.assertIn("不满足夜间游览要求", result["markdown"])
-        self.assertIn("不满足夜间游览要求", result["dayPlans"][0]["stops"][0]["warning"])
+            with self.assertRaises(HTTPException) as failure:
+                await build_itinerary(request)
+        self.assertIn("开放", failure.exception.detail)
 
     async def test_verified_hours_shift_evening_visit_and_keep_it_last(self):
         evening = Place(placeId="e", name="夜间博物馆", category="风景名胜", address="武汉", location=Point(lng=114.30, lat=30.54), source="高德地图")
@@ -60,9 +62,10 @@ class ItineraryOpeningTests(unittest.IsolatedAsyncioTestCase):
         route = AsyncMock(return_value={"minutes": 10, "minutesMin": None, "minutesMax": None, "distanceMeters": 400, "source": "模拟路线", "polyline": []})
         with (
             patch("app.itinerary_doc.settings.amap_web_service_key", "test"),
+            patch("app.itinerary_doc.verify_required_place", new=AsyncMock(side_effect=lambda p: p)),
             patch("app.itinerary_doc.search_places", new=AsyncMock(return_value=([], "高德"))),
-            patch("app.itinerary_doc._model", new=AsyncMock(return_value=None)),
-            patch("app.itinerary_doc.calculate_route", new=route),
+            patch("app.itinerary_doc._model", new=AsyncMock(return_value='{"days":[[{"placeId":"d","experience":"公园漫步","timeWindow":"morning"},{"placeId":"e","experience":"参观博物馆","timeWindow":"evening"}]]}')),
+            patch("app.trip_intent.calculate_route", new=route),
             patch("app.itinerary_doc.collect_opening_hours", new=AsyncMock(return_value={"e": "18:00-22:00", "d": "09:00-17:00"})),
         ):
             result = await build_itinerary(request)

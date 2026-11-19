@@ -84,3 +84,20 @@ API 测试覆盖地点搜索、任务令牌、SSE、规划、固定活动警告�
 ## 文档
 
 产品与技术基线见 `docs/PRD.md`、`docs/ARCHITECTURE.md`、`docs/DECISIONS.md`、`docs/DEVELOPMENT.md`。
+
+## 景点知识库
+
+后端复用 `TASK_DATABASE` 指向的 SQLite，新增 `poi_places`、`poi_sources`、`poi_facts`、`poi_sessions` 四张表。开放规则可按旅行日期、星期、跨年季节和指定日期查询；特殊闭园优先于常规规则，日场与夜场分开存储。过期或冲突规则不作为已确认开放时段。所有字段须保留来源 URL、核实时间和状态。
+
+在 `backend` 目录运行：
+
+```powershell
+python -m app.poi_knowledge.refresh --all
+python -m app.poi_knowledge.refresh --place "黄鹤楼"
+python -m app.poi_knowledge.refresh --all --expired-only
+python -m app.poi_knowledge.refresh --failures
+```
+
+采集器先用高德确定 POI，再复用 DeepSeek Search/Fetch 保存可追溯的事实；名称重复且无法唯一定位时报告失败。`official_seed.py` 记录了人工核对过的黄鹤楼日场和湖北省博物馆公告。运行全量命令会载入这些有明确来源的规则；已固定核实日期，后续不会仅因重新运行而自动延长有效期。没有 2026-11-22 夜上黄鹤楼可靠场次证据，因此知识库不会把夜游作为已开放时段。
+
+行程生成先查本地库，仅对仍缺资料的必去地点做限时联网查询，并把逐日开放情况交给唯一一次 AI 规划。规划后只计算与校验时间、路线；冲突会给出原因。暂未自动创建 Windows 计划任务，可按上面的命令自行配置任务计划程序。

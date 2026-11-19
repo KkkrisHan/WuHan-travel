@@ -13,6 +13,7 @@ class Point(BaseModel):
 
 class Place(BaseModel):
     placeId: str
+    poiId: str | None = None
     name: str
     category: str = "地点"
     address: str = "地址未知"
@@ -53,6 +54,8 @@ class Leg(BaseModel):
     minutesMin: int | None = None
     minutesMax: int | None = None
     distanceMeters: int | None = None
+    walkingMinutes: int | None = None
+    transfers: int | None = None
     source: str
     polyline: list[Point] = Field(default_factory=list)
 
