@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-flash"
-    frontend_origin: str = "http://localhost:5173"
+    frontend_origin: str = "http://localhost:5173,http://127.0.0.1:5173"
     task_database: str = "./tasks.sqlite3"
 
 
