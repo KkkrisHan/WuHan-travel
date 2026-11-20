@@ -96,7 +96,7 @@ export function AssistantPanel({ messages, selected, modelConfigured, onSend, on
   return (
     <div className="assistant-panel">
       <div className="panel-heading">
-        <div><div className="panel-kicker"><IconSparkles size={15}/> 旅行助手</div><h2>和武汉聊聊</h2></div>
+        <div><div className="panel-kicker"><IconSparkles size={15}/> 城市 AI 接待员</div><h2>和武汉聊聊</h2></div>
         <span className="panel-status">{modelConfigured ? "已连接模型" : "基础模式"}</span>
       </div>
       <div className="message-scroller">

@@ -27,6 +27,10 @@ body,
 body {
   overflow-x: hidden;
 }
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 76px;
+}
 button,
 input,
 textarea {

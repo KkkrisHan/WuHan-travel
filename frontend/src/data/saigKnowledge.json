@@ -1,0 +1,67 @@
+{
+  "updatedAt": "2026-11-19",
+  "sources": {
+    "saig": "https://www.dlife.love/saig/",
+    "home": "https://www.dlife.love/",
+    "communityReporting": "https://finance.sina.cn/stock/jdts/2026-11-12/detail-iniynpnv1212548.d.html"
+  },
+  "wuhan": {
+    "headline": "武汉，一座江湖与未来交汇的城市",
+    "summary": "长江与汉江在这里交汇，武昌、汉口、汉阳隔江相望。黄鹤楼、东湖与汉口历史街区，和不断生长的现代城市生活，共同组成武汉的日常。",
+    "river": "两江交汇，三镇相望。武汉的城市节奏沿江展开，也在街巷、湖岸与老建筑之间切换。"
+  },
+  "spu": {
+    "fullName": "Super Person Unit",
+    "translation": "超级人类单元",
+    "formula": "1 Person + AI = SPU",
+    "definition": "一个人结合 AI，可以构成一个完整的生产单元，并独立完成一项任务的交付。",
+    "company": "数命科技（武汉）有限公司推动 SPU 理念，并发起数命 SPU 社区及 SAIG 赛事。",
+    "community": "数命 SPU 社区是由数命科技推动的实践型 AI 社区，强调围绕真实问题学习和使用 AI、承接订单、完成交付并展示成果。",
+    "whyOrders": "真实订单把学习放进具体场景：需求方提出问题和验收目标，参与者用 AI 完成工作，再让结果接受使用和反馈。",
+    "stages": ["学习 AI", "承接真实问题", "完成交付", "展示成果"],
+    "example": "概念性示例（非真实订单）：一家本地店铺希望减少每日盘点工作，一位经营者或开发者借助 AI 做出库存记录与提醒工具，再根据店铺反馈调整。",
+    "ordinaryMeaning": "对普通人来说，SPU 关注的是能否借助 AI 把熟悉领域里的问题做成可用成果，不要求每个人先成为模型或软件工程专家。"
+  },
+  "saig": {
+    "name": "SAIG 数命 SPU 国际 AI 大赛",
+    "theme": "AI For Everyone｜让 AI 属于每一个人",
+    "eventDates": "2026 年 12 月 18–20 日",
+    "competitionDates": "2026 年 12 月 18–19 日",
+    "competitionHours": "每天 10:00–18:00，共 16 小时，不通宵",
+    "location": "中国武汉江岸历史街区；主要比赛场地为平和打包厂，数命 SPU 社区主场为智民里。",
+    "participants": 108,
+    "landmarks": 5,
+    "challenge": "使用 AI 承接并完成客户真实订单。现场选手选择订单，完成后可继续接单，按订单分值累计成绩。",
+    "prizePool": "100 万美元：50 万美元现金 + 50 万美元 AI 模型调用额度。",
+    "onlineStart": "2026 年 10 月 24 日",
+    "onlineChallenge": "武汉数命 SPU 城市 AI 接待员，作品形式不限。",
+    "submission": "免费报名；提交报名信息、项目说明和演示视频链接，产品演示链接可选。报名截止日期由主办方另行公布。",
+    "registrationStatus": "SAIG 官方页面当前显示报名仍开放；报名截止日期尚未公布。",
+    "selection": "演示视频人气榜前 18 名直接获邀；中国大陆、港澳台、全球三个赛区各选拔 30 人，每个赛区含 15 名 AI 从业者及 15 名非 AI 从业者。",
+    "marketTest": "现场比赛后进行真实市场测试。最终成绩权重为现场表现 40%、市场测试 60%；官方页面列明奖项约于 2027 年 4 月发放。",
+    "participation": "官网当前显示报名仍开放，截止日期尚未公布。个人免费报名参赛；每个赛区为非 AI 从业者预留名额。公众可按官方公布的预约及购票安排参观体验；也可提交真实需求、摆摊、参展或志愿服务。",
+    "ticketStatus": "票价和开售日期尚未公布；展区按时段预约，具体观赛方式待官方后续公告。",
+    "scheduleCaveat": "活动为 12 月 18–20 日三天；现场竞赛仅在 12 月 18–19 日举行。具体日程以官方最终公告为准。",
+    "themes": [
+      {"name": "学习 AI + 教育", "experience": "亲子学习、机器人编程、老建筑 AI 导览"},
+      {"name": "实践 AI + 生产力", "experience": "看选手接单、体验一人公司和 AI 企业招聘"},
+      {"name": "体验 AI + 日常生活", "experience": "尝试小店 AI 点单，体验武汉风味与生活服务"},
+      {"name": "玩 AI + 娱乐", "experience": "制作歌曲、短片或宠物 AI 画像"},
+      {"name": "关怀 AI + 健康", "experience": "老照片修复、长者课程与关怀主题活动"},
+      {"name": "展望 AI + 未来产业", "experience": "机器人演示、新产品发布与试用"}
+    ],
+    "timeline": [
+      {"name": "线上选拔", "date": "2026.10.24 起", "description": "完成城市 AI 接待员作品并提交项目说明与演示视频链接。"},
+      {"name": "现场比赛", "date": "2026.12.18–19", "description": "108 位选手在武汉围绕真实客户订单进行两天比赛。"},
+      {"name": "市场测试", "date": "2027.03.31", "description": "作品进入真实市场测试，最终成绩按现场表现 40%、市场测试 60% 计算。"}
+    ]
+  },
+  "faq": [
+    {"question": "SAIG 是什么？", "prompt": "请介绍 SAIG 数命 SPU 国际 AI 大赛的主题、目标和赛制。"},
+    {"question": "比赛什么时候、在哪里举办？", "prompt": "SAIG 的三日活动和现场比赛分别是什么日期、在哪里举行？"},
+    {"question": "非 AI 从业者能参赛吗？", "prompt": "不从事 AI 工作可以参加 SAIG 吗？请说明官方公布的名额安排。"},
+    {"question": "线上赛要提交什么？", "prompt": "SAIG 线上选拔的赛题和提交材料是什么？"},
+    {"question": "现场赛怎么进行？", "prompt": "SAIG 现场比赛的核心形式、时间和计分方式是什么？"},
+    {"question": "SPU 社区与 SAIG 有什么关系？", "prompt": "请区分 SPU 理念、数命科技、数命 SPU 社区和 SAIG 大赛之间的关系。"}
+  ]
+}

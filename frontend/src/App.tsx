@@ -17,12 +17,12 @@ import {
   IconRoute,
   IconSparkles,
 } from "@tabler/icons-react";
-import { Dashboard } from "./components/Dashboard";
 import { Wizard } from "./components/Wizard";
 import { MapWorkspace } from "./components/MapWorkspace";
 import { AssistantPanel } from "./components/AssistantPanel";
 import { ItineraryPanel } from "./components/ItineraryPanel";
 import { MustVisitPanel } from "./components/MustVisitPanel";
+import { LandingPage } from "./components/LandingPage";
 import { api, subscribe } from "./lib/api";
 import {
   db,
@@ -105,6 +105,7 @@ function App() {
   );
   const [fullscreen, setFullscreen] = useState(false);
   const [modelConfigured, setModelConfigured] = useState(false);
+  const landingQuestion = useRef("");
   const activeTasks = useRef(
     new Map<string, { task: TaskCreated; close: () => void }>(),
   );
@@ -522,6 +523,16 @@ function App() {
     setRightTab("assistant");
     runMessage(answer, trip, input);
   };
+  const sendChatRef = useRef<((input: string) => Promise<void>) | null>(null);
+  useEffect(() => {
+    sendChatRef.current = sendChat;
+  });
+  useEffect(() => {
+    const question = landingQuestion.current;
+    if (page !== "workspace" || !trip || !question) return;
+    landingQuestion.current = "";
+    if (sendChatRef.current) void sendChatRef.current(question);
+  }, [page, trip]);
   const introPlace = async (place: Place) => {
     if (!trip) return;
     const message = newMessage("assistant", "intro", "", place);
@@ -774,7 +785,7 @@ function App() {
     );
   if (page === "dashboard" || !trip)
     return (
-      <Dashboard
+      <LandingPage
         trips={trips}
         onOpen={openTrip}
         onExplore={() => create(true)}
@@ -795,6 +806,12 @@ function App() {
             deleteTrip(target)
               .then(() => debounceCleanup())
               .catch(inform);
+        }}
+        onAsk={(question) => {
+          landingQuestion.current = question;
+          const latest = [...trips].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+          if (latest) openTrip(latest);
+          else void create(true);
         }}
       />
     );
