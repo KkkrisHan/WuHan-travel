@@ -41,10 +41,10 @@ const tripData = (trip: Trip): TripData => ({
   generatedItineraries: clone(trip.generatedItineraries || []),
 });
 
-export async function newTrip(
+function createTrip(
   explore: boolean,
   preferences: Preferences = defaultPreferences,
-): Promise<Trip> {
+): Trip {
   const now = new Date().toISOString();
   const trip: Trip = {
     id: crypto.randomUUID(),
@@ -67,8 +67,30 @@ export async function newTrip(
     trip.name = `${preferences.startDate.slice(5).replace("-", "月")}日 · 武汉之旅`;
     trip.nameSource = "suggested";
   }
+  return trip;
+}
+
+export async function newTrip(
+  explore: boolean,
+  preferences: Preferences = defaultPreferences,
+): Promise<Trip> {
+  const trip = createTrip(explore, preferences);
   await db.trips.add(trip);
   return trip;
+}
+
+export async function replaceCurrentTrip(
+  current: Trip | undefined,
+  explore: boolean,
+  preferences: Preferences = defaultPreferences,
+): Promise<Trip> {
+  if (!current) return newTrip(explore, preferences);
+  const replacement = createTrip(explore, preferences);
+  replacement.id = current.id;
+  replacement.secret = current.secret;
+  replacement.createdAt = current.createdAt;
+  await db.trips.put(replacement);
+  return replacement;
 }
 
 export async function mutateTrip(

@@ -63,11 +63,19 @@ export type Candidate = {
   days: DayPlan[];
   warnings: string[];
 };
+export type MessageSource = {
+  id: string;
+  title: string;
+  url: string;
+  domain?: string;
+  snippet?: string;
+};
 export type Message = {
   id: string;
   role: "user" | "assistant";
   kind: "chat" | "intro";
   text: string;
+  sources?: MessageSource[];
   status: "running" | "completed" | "failed";
   place?: Place;
   error?: string;

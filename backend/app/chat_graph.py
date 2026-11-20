@@ -15,6 +15,7 @@ class ChatState(TypedDict, total=False):
     patch: dict | None
     action: str | None
     on_delta: Callable[[str], Awaitable[None]] | None
+    on_sources: Callable[[list[dict]], Awaitable[None]] | None
 
 
 async def respond(state: ChatState) -> dict:
@@ -23,7 +24,7 @@ async def respond(state: ChatState) -> dict:
     patch = None if state["locked"] else simple_patch(state["snapshot"], state["message"])
     if patch:
         return {"answer": f"正在应用：从行程中移除{patch['placeName']}。", "patch": patch}
-    return {"answer": await chat(state["snapshot"], state["message"], on_delta=state.get("on_delta")), "patch": None}
+    return {"answer": await chat(state["snapshot"], state["message"], on_delta=state.get("on_delta"), on_sources=state.get("on_sources")), "patch": None}
 
 
 graph = (StateGraph(ChatState)

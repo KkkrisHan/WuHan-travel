@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import React from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { renderToStaticMarkup } from "react-dom/server";
 import { useLiveQuery } from "dexie-react-hooks";
 import {
@@ -9,8 +7,6 @@ import {
   IconArrowsMaximize,
   IconArrowsMinimize,
   IconBookmark,
-  IconChevronDown,
-  IconCompass,
   IconHistory,
   IconLayoutSidebarRight,
   IconMapPin,
@@ -20,23 +16,27 @@ import {
 import { Wizard } from "./components/Wizard";
 import { MapWorkspace } from "./components/MapWorkspace";
 import { AssistantPanel } from "./components/AssistantPanel";
+import { AssistantDrawer } from "./components/AssistantDrawer";
+import { AssistantDrawerHandle } from "./components/AssistantDrawerHandle";
+import { MarkdownContent } from "./components/MarkdownContent";
 import { ItineraryPanel } from "./components/ItineraryPanel";
 import { MustVisitPanel } from "./components/MustVisitPanel";
 import { LandingPage } from "./components/LandingPage";
-import { api, subscribe } from "./lib/api";
+import { ServiceSettings } from "./components/ServiceSettings";
+import { api, subscribe, type ServiceStatus } from "./lib/api";
 import {
   db,
-  deleteTrip,
-  duplicateTrip,
+  defaultPreferences,
   mutateTrip,
-  newTrip,
+  replaceCurrentTrip,
   restoreVersion,
   undoTrip,
-  updateMessages,
 } from "./lib/db";
 import { exportTrip } from "./lib/export";
 import { recoverItinerary } from "./lib/itinerary";
 import { generateItineraryWithProgress } from "./lib/itineraryStream";
+import { isInsideWuhan } from "./lib/wuhanBoundary";
+import { loadWuhanBoundary } from "./lib/wuhanBoundary";
 import type {
   Candidate,
   Message,
@@ -49,6 +49,64 @@ import type {
 } from "./types";
 
 type Page = "dashboard" | "wizard" | "workspace";
+type ServiceRequirement = "amap" | "amapWeb" | "ai";
+const CHAT_STORAGE_KEY = "wuhan-ai-concierge-chat";
+const ASSISTANT_CONTEXT_KEY = "wuhan-ai-concierge-assistant-context";
+const separateLegacySources = (message: Message): Message => {
+  if (message.role !== "assistant" || message.sources?.length) return message;
+  const chatAppendix = message.text.match(/\n{2,}\*\*本次联网检索来源\*\*\n([\s\S]*)$/);
+  const introAppendix = message.text.match(/\n{2,}来源与核查时间：([^\n]+)\n([\s\S]*)$/);
+  const appendix = chatAppendix?.[1] || introAppendix?.[2];
+  if (!appendix) return message;
+  const lines = appendix.split("\n").filter(Boolean);
+  const sources = lines.flatMap((line, index) => {
+    const chatSource = line.match(/^\[来源\d+\]\s+\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/);
+    const introSource = line.match(/^\[\d+\]\s*(.*?)：\s*(https?:\/\/\S+)$/);
+    const match = chatSource || introSource;
+    return match ? [{ id: `legacy-${message.id}-${index}`, title: match[1], url: match[2] }] : [];
+  });
+  if (!sources.length || sources.length !== lines.length) return message;
+  const checkTime = introAppendix?.[1];
+  const text = message.text.slice(0, chatAppendix?.index ?? introAppendix!.index).trimEnd()
+    + (checkTime ? `\n\n资料核查时间：${checkTime}` : "");
+  return { ...message, text, sources };
+};
+const readSavedConversation = (): Message[] => {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(CHAT_STORAGE_KEY) || "[]");
+    if (!Array.isArray(value)) return [];
+    const messages = (value as Message[]).map(separateLegacySources);
+    if (JSON.stringify(messages) !== JSON.stringify(value)) localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(messages));
+    return messages;
+  } catch { return []; }
+};
+const readAssistantContext = () => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(ASSISTANT_CONTEXT_KEY) || "null") as { id?: string; secret?: string } | null;
+    if (saved?.id && saved.secret && saved.secret.length >= 32) return { id: saved.id, secret: saved.secret };
+  } catch { /* create a fresh browser scoped context */ }
+  const context = { id: crypto.randomUUID(), secret: crypto.randomUUID() + crypto.randomUUID() };
+  localStorage.setItem(ASSISTANT_CONTEXT_KEY, JSON.stringify(context));
+  return context;
+};
+const assistantContext = readAssistantContext();
+const emptyAssistantTrip = (): Trip => ({
+  id: assistantContext.id,
+  secret: assistantContext.secret,
+  revision: 0,
+  createdAt: new Date(0).toISOString(),
+  updatedAt: new Date().toISOString(),
+  name: "武汉城市问答",
+  nameSource: "default",
+  preferences: structuredClone(defaultPreferences),
+  savedPlaces: [],
+  pendingPlaces: [],
+  itinerary: [],
+  generatedItineraries: [],
+  messages: [],
+  history: [],
+  redo: [],
+});
 const newMessage = (
   role: Message["role"],
   kind: Message["kind"],
@@ -77,6 +135,7 @@ const debounceCleanup = async () => {
 function App() {
   void ItineraryPanel; void restoreVersion;
   const trips = useLiveQuery(() => db.trips.toArray(), [], []);
+  const currentTrip = [...trips].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
   const [page, setPage] = useState<Page>("dashboard");
   const [tripId, setTripId] = useState<string | null>(null);
   const trip = useLiveQuery(
@@ -104,8 +163,23 @@ function App() {
     Number(localStorage.getItem("wuhan-map-split") || 55),
   );
   const [fullscreen, setFullscreen] = useState(false);
-  const [modelConfigured, setModelConfigured] = useState(false);
-  const landingQuestion = useRef("");
+  const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null);
+  const serviceStatusRef = useRef<ServiceStatus | null>(null);
+  const modelConfigured = serviceStatus?.ai.configured ?? false;
+  const [serviceSettingsOpen, setServiceSettingsOpen] = useState(false);
+  const [serviceSettingsTab, setServiceSettingsTab] = useState<"amap" | "ai">("amap");
+  const [serviceSettingsRequiresWeb, setServiceSettingsRequiresWeb] = useState(false);
+  const pendingServiceAction = useRef<(() => void) | null>(null);
+  const pendingServiceName = useRef<ServiceRequirement | null>(null);
+  const [regionReady, setRegionReady] = useState(false);
+  const [regionError, setRegionError] = useState("");
+  const regionBoundaryPromise = useRef<Promise<boolean> | null>(null);
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [conversation, setConversation] = useState<Message[]>(readSavedConversation);
+  const conversationRef = useRef(conversation);
+  const drawerCloseRef = useRef<HTMLButtonElement>(null);
+  const assistantTriggerRef = useRef<HTMLElement | null>(null);
+  const wasAssistantOpen = useRef(false);
   const activeTasks = useRef(
     new Map<string, { task: TaskCreated; close: () => void }>(),
   );
@@ -113,20 +187,99 @@ function App() {
   const splitDragging = useRef(false);
   const isLocked = !!planningTask;
 
+  useEffect(() => {
+    api.servicesStatus().then((status) => { serviceStatusRef.current = status; setServiceStatus(status); }).catch(() => setServiceStatus(null));
+  }, []);
+  const requirementConfigured = (name: ServiceRequirement, status: ServiceStatus) =>
+    name === "amapWeb" ? status.amap.webServiceConfigured : status[name].configured;
+  const requireService = async (name: ServiceRequirement, action: () => void) => {
+    let current = serviceStatusRef.current;
+    if (!current) {
+      try { current = await api.servicesStatus(); serviceStatusRef.current = current; setServiceStatus(current); }
+      catch { setNotice("无法连接本机服务，请确认 FastAPI 已启动后重试。"); return; }
+    }
+    if (requirementConfigured(name, current)) { action(); return; }
+    pendingServiceName.current = name;
+    pendingServiceAction.current = action;
+    setServiceSettingsTab(name === "ai" ? "ai" : "amap");
+    setServiceSettingsRequiresWeb(name === "amapWeb");
+    setServiceSettingsOpen(true);
+  };
+  const openServiceSettings = (name: "amap" | "ai" = "amap") => {
+    setServiceSettingsTab(name);
+    setServiceSettingsRequiresWeb(false);
+    setServiceSettingsOpen(true);
+  };
+  const onServiceSaved = (next: ServiceStatus) => {
+    serviceStatusRef.current = next;
+    setServiceStatus(next);
+    const name = pendingServiceName.current;
+    if (name && requirementConfigured(name, next)) {
+      const action = pendingServiceAction.current;
+      pendingServiceName.current = null;
+      pendingServiceAction.current = null;
+      setServiceSettingsOpen(false);
+      action?.();
+    }
+  };
+  const closeServiceSettings = () => {
+    pendingServiceName.current = null;
+    pendingServiceAction.current = null;
+    setServiceSettingsOpen(false);
+  };
+
   const inform = useCallback(
     (error: unknown) =>
       setNotice(error instanceof Error ? error.message : String(error)),
     [],
   );
+  const updateConversation = useCallback((update: (items: Message[]) => Message[]): Promise<void> => {
+    const next = update(conversationRef.current);
+    conversationRef.current = next;
+    setConversation(next);
+    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(next));
+    return Promise.resolve();
+  }, []);
+  useEffect(() => { conversationRef.current = conversation; }, [conversation]);
+  useEffect(() => {
+    if (!conversationRef.current.length && currentTrip?.messages.length) updateConversation(() => currentTrip.messages);
+  }, [currentTrip, updateConversation]);
+  useEffect(() => {
+    if (assistantOpen && !wasAssistantOpen.current) drawerCloseRef.current?.focus();
+    if (!assistantOpen && wasAssistantOpen.current) assistantTriggerRef.current?.focus();
+    wasAssistantOpen.current = assistantOpen;
+    if (assistantOpen) {
+      const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setAssistantOpen(false); };
+      window.addEventListener("keydown", closeOnEscape);
+      return () => window.removeEventListener("keydown", closeOnEscape);
+    }
+  }, [assistantOpen]);
+  useEffect(() => {
+    let active = true;
+    regionBoundaryPromise.current = loadWuhanBoundary()
+      .then(() => { if (active) setRegionReady(true); return true; })
+      .catch((error) => {
+        if (active) setRegionError(error instanceof Error ? error.message : "武汉行政边界加载失败，地点选择已暂停。");
+        return false;
+      });
+    return () => { active = false; };
+  }, []);
+  const invalidLegacyPlaceCount = useMemo(() => {
+    if (!regionReady || !trip) return 0;
+    return [
+      ...trip.pendingPlaces,
+      ...trip.savedPlaces,
+      ...trip.itinerary.flatMap((day) => day.stops.map((stop) => stop.place)),
+    ].filter((place) => !isInsideWuhan(place.location)).length;
+  }, [regionReady, trip]);
+  const visibleNotice = notice || (invalidLegacyPlaceCount
+    ? `当前旅行中有 ${invalidLegacyPlaceCount} 个武汉范围外或坐标无效的历史地点。原数据已保留；请手动移除，且这些地点不会用于新的介绍、选择或规划。`
+    : regionError);
   useEffect(() => {
     api
       .featured()
       .then((data) => setFeatured(data.places))
       .catch(() => setNotice("后端尚未连接；启动服务后可搜索地点和规划行程"));
-    api
-      .health()
-      .then((status) => setModelConfigured(status.modelConfigured))
-      .catch(() => undefined);
     debounceCleanup();
     const online = () => debounceCleanup();
     window.addEventListener("online", online);
@@ -184,6 +337,10 @@ function App() {
   }, []);
 
   const openTrip = (next: Trip) => {
+    if (!serviceStatusRef.current?.amap.configured) {
+      void requireService("amap", () => openTrip(next));
+      return;
+    }
     const latest = next.generatedItineraries?.at(-1);
     if (!next.itinerary.length && latest) {
       const recovered = recoverItinerary(latest);
@@ -216,18 +373,30 @@ function App() {
     setPage("dashboard");
   };
   const create = async (explore: boolean, preferences?: Preferences) => {
+    if (!explore && preferences?.requirements?.trim() && !serviceStatusRef.current?.ai.configured) {
+      void requireService("ai", () => { void create(explore, preferences); });
+      return;
+    }
+    const latest = [...trips].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+    if (latest && !window.confirm("这会替换当前旅行及其行程资料。是否继续？")) {
+      setPage("dashboard");
+      return;
+    }
     try {
-      const created = await newTrip(explore, preferences);
+      const created = await replaceCurrentTrip(latest, explore, preferences);
       openTrip(created);
       const requirements = preferences?.requirements?.trim();
       if (!explore && requirements) {
         setNotice("AI 正在从特殊信息中识别必去景点…");
         try {
+          if (!regionBoundaryPromise.current || !(await regionBoundaryPromise.current))
+            throw new Error("武汉行政边界尚不可用");
           const extracted = await api.extractMustVisit(requirements);
-          if (extracted.places.length) {
+          const localPlaces = extracted.places.filter((place) => isInsideWuhan(place.location));
+          if (localPlaces.length) {
             await mutateTrip(created.id, "自动识别特殊信息中的必去景点", (draft) => {
               const ids = new Set(draft.pendingPlaces.map((place) => place.placeId));
-              for (const place of extracted.places) {
+              for (const place of localPlaces) {
                 if (!ids.has(place.placeId)) {
                   draft.pendingPlaces.push(place);
                   ids.add(place.placeId);
@@ -236,8 +405,8 @@ function App() {
             }, undefined, "agent");
           }
           setNotice(
-            extracted.places.length
-              ? `已从特殊信息中添加 ${extracted.places.length} 个必去景点：${extracted.places.map((place) => place.name).join("、")}${extracted.unresolved.length ? "；部分地点未找到，请手动搜索添加" : ""}`
+            localPlaces.length
+              ? `已从特殊信息中添加 ${localPlaces.length} 个武汉必去景点：${localPlaces.map((place) => place.name).join("、")}${extracted.unresolved.length || localPlaces.length !== extracted.places.length ? "；部分地点不在武汉或未能定位，请手动搜索添加" : ""}`
               : extracted.unresolved.length
                 ? "识别到地点要求，但地图未找到完全匹配的地点，请手动添加。"
                 : "已检查特殊信息，未找到明确要求的必去景点。",
@@ -267,11 +436,20 @@ function App() {
       inform(error);
     }
   };
-  const addPending = (place: Place) =>
-    change(`加入${place.name}到待安排`, (draft) => {
+  const addPending = (place: Place) => {
+    if (!regionReady) {
+      setNotice("武汉行政边界尚未加载完成，暂时不能添加地点。");
+      return;
+    }
+    if (!isInsideWuhan(place.location)) {
+      setNotice("只能将武汉市行政区域内且坐标有效的地点加入必去景点。");
+      return;
+    }
+    return change(`加入${place.name}到待安排`, (draft) => {
       if (!draft.pendingPlaces.some((item) => item.placeId === place.placeId))
         draft.pendingPlaces.push(place);
     });
+  };
   const openGenerator = () => {
     if (!trip) return;
     setSpecialRequirements(trip.preferences.requirements || "");
@@ -282,6 +460,7 @@ function App() {
   const generateDocument = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!trip) return;
+    if (!regionReady) { setGenerateError("武汉行政边界尚未加载完成，暂时不能生成行程。"); return; }
     const prefs = trip.preferences;
     if (!Number.isInteger(prefs.people) || prefs.people < 1 || !Number.isInteger(prefs.days) || prefs.days < 1) {
       setGenerateError("旅行设置中的人数或天数无效，请先修改设置。");
@@ -293,7 +472,7 @@ function App() {
     try {
       const requirements = specialRequirements.trim();
       const generated = await generateItineraryWithProgress({
-        mustVisitPlaces: trip.pendingPlaces,
+        mustVisitPlaces: trip.pendingPlaces.filter((place) => isInsideWuhan(place.location)),
         people: prefs.people,
         days: prefs.days,
         requirements,
@@ -315,13 +494,15 @@ function App() {
         people: prefs.people,
         days: prefs.days,
         requirements,
-        mustVisitPlaces: structuredClone(trip.pendingPlaces),
-        recommendedPlaces: generated.recommendedPlaces,
+        mustVisitPlaces: structuredClone(trip.pendingPlaces.filter((place) => isInsideWuhan(place.location))),
+        recommendedPlaces: generated.recommendedPlaces.filter((place) => isInsideWuhan(place.location)),
         dayPlans: generated.dayPlans,
         strategy: generated.strategy,
         metrics: generated.metrics,
         createdAt: new Date().toISOString(),
       };
+      if (generated.dayPlans.some((day) => day.stops.some((stop) => !isInsideWuhan(stop.place.location))))
+        throw new Error("规划结果包含武汉市范围外的地点，未保存。请调整要求后重试。");
       await mutateTrip(trip.id, "生成当前行程", (draft) => {
         draft.generatedItineraries = [...(draft.generatedItineraries || []), document].slice(-5);
         draft.itinerary = structuredClone(generated.dayPlans);
@@ -366,6 +547,12 @@ function App() {
     sourceTrip: Trip,
     input?: string,
   ) => {
+    if (message.kind === "intro" && (!message.place || !isInsideWuhan(message.place.location))) {
+      await updateConversation((items) => items.map((item) => item.id === message.id
+        ? { ...item, status: "failed", error: "该地点不在武汉市行政区域内，不能生成景点介绍。" }
+        : item));
+      return;
+    }
     try {
       const task =
         message.kind === "intro" && message.place
@@ -375,7 +562,7 @@ function App() {
         task,
         (event) => {
           if (event.type === "message_delta")
-            updateMessages(sourceTrip.id, (items) =>
+            updateConversation((items) =>
               items.map((item) =>
                 item.id === message.id
                   ? {
@@ -389,6 +576,7 @@ function App() {
             const result = event.payload.result as {
               text?: string;
               action?: string;
+              sources?: Message["sources"];
               patch?: {
                 operation: string;
                 dayId: string;
@@ -421,6 +609,7 @@ function App() {
                   );
                   day.warnings.push("AI 修改后，交通时间需重新核对。");
                   if (
+                    isInsideWuhan(removed.place.location) &&
                     !draft.pendingPlaces.some(
                       (place) => place.placeId === removed.place.placeId,
                     )
@@ -431,7 +620,7 @@ function App() {
                 "agent",
               )
                 .then(() =>
-                  updateMessages(sourceTrip.id, (items) =>
+                  updateConversation((items) =>
                     items.map((item) =>
                       item.id === message.id
                         ? {
@@ -444,7 +633,7 @@ function App() {
                   ),
                 )
                 .catch((error) =>
-                  updateMessages(sourceTrip.id, (items) =>
+                  updateConversation((items) =>
                     items.map((item) =>
                       item.id === message.id
                         ? {
@@ -461,12 +650,13 @@ function App() {
                   ),
                 );
             } else {
-              updateMessages(sourceTrip.id, (items) =>
+              updateConversation((items) =>
                 items.map((item) =>
                   item.id === message.id
                     ? {
                         ...item,
                         text: String(result?.text || item.text),
+                        sources: result?.sources || item.sources,
                         status: "completed",
                       }
                     : item,
@@ -479,7 +669,7 @@ function App() {
             }
           }
           if (event.type === "task_failed" || event.type === "task_cancelled")
-            updateMessages(sourceTrip.id, (items) =>
+            updateConversation((items) =>
               items.map((item) =>
                 item.id === message.id
                   ? {
@@ -492,7 +682,7 @@ function App() {
             ).catch(inform);
         },
         (error) =>
-          updateMessages(sourceTrip.id, (items) =>
+          updateConversation((items) =>
             items.map((item) =>
               item.id === message.id
                 ? { ...item, status: "failed", error }
@@ -501,7 +691,7 @@ function App() {
           ).catch(inform),
       );
     } catch (error) {
-      await updateMessages(sourceTrip.id, (items) =>
+      await updateConversation((items) =>
         items.map((item) =>
           item.id === message.id
             ? {
@@ -516,33 +706,43 @@ function App() {
     }
   };
   const sendChat = async (input: string) => {
-    if (!trip) return;
+    if (!serviceStatusRef.current?.ai.configured) {
+      void requireService("ai", () => { void sendChat(input); });
+      return;
+    }
+    const context = trip || currentTrip || emptyAssistantTrip();
     const user = newMessage("user", "chat", input),
       answer = newMessage("assistant", "chat", "");
-    await updateMessages(trip.id, (items) => [...items, user, answer]);
+    await updateConversation((items) => [...items, user, answer]);
     setRightTab("assistant");
-    runMessage(answer, trip, input);
+    runMessage(answer, { ...context, messages: [...conversationRef.current] }, input);
   };
-  const sendChatRef = useRef<((input: string) => Promise<void>) | null>(null);
-  useEffect(() => {
-    sendChatRef.current = sendChat;
-  });
-  useEffect(() => {
-    const question = landingQuestion.current;
-    if (page !== "workspace" || !trip || !question) return;
-    landingQuestion.current = "";
-    if (sendChatRef.current) void sendChatRef.current(question);
-  }, [page, trip]);
   const introPlace = async (place: Place) => {
-    if (!trip) return;
+    if (!serviceStatusRef.current?.ai.configured) {
+      void requireService("ai", () => { void introPlace(place); });
+      return;
+    }
+    if (!regionReady) {
+      setNotice("武汉行政边界尚未加载完成，暂时不能介绍地点。");
+      return;
+    }
+    if (!isInsideWuhan(place.location)) {
+      setNotice("只能介绍武汉市行政区域内且坐标有效的地点。");
+      return;
+    }
+    const context = trip || currentTrip || emptyAssistantTrip();
     const message = newMessage("assistant", "intro", "", place);
-    await updateMessages(trip.id, (items) => [...items, message]);
+    await updateConversation((items) => [...items, message]);
     setRightTab("assistant");
-    runMessage(message, trip);
+    runMessage(message, { ...context, messages: [...conversationRef.current] });
   };
   const retryMessage = async (message: Message) => {
-    if (!trip) return;
-    await updateMessages(trip.id, (items) =>
+    if (!serviceStatusRef.current?.ai.configured) {
+      void requireService("ai", () => { void retryMessage(message); });
+      return;
+    }
+    const context = trip || currentTrip || emptyAssistantTrip();
+    await updateConversation((items) =>
       items.map((item) =>
         item.id === message.id
           ? { ...item, text: "", error: undefined, status: "running" }
@@ -551,22 +751,39 @@ function App() {
     );
     runMessage(
       message,
-      trip,
-      trip.messages.find(
-        (_, index) => trip.messages[index + 1]?.id === message.id,
-      )?.text,
+      { ...context, messages: [...conversationRef.current] },
+      conversationRef.current[conversationRef.current.findIndex((item) => item.id === message.id) - 1]?.text,
     );
   };
   const generate = async (mode: "plan" | "optimize" = "plan") => {
     if (!trip) return;
+    if (!serviceStatusRef.current?.amap.webServiceConfigured) {
+      void requireService("amapWeb", () => { void generate(mode); });
+      return;
+    }
+    if (!serviceStatusRef.current?.ai.configured) {
+      void requireService("ai", () => { void generate(mode); });
+      return;
+    }
+    if (!regionReady) { setNotice("武汉行政边界尚未加载完成，暂时不能规划行程。"); return; }
     setCandidates([]);
     setPreviewId(null);
     setProgress("");
     try {
+      const eligibleTrip = {
+        ...trip,
+        pendingPlaces: trip.pendingPlaces.filter((place) => isInsideWuhan(place.location)),
+        savedPlaces: trip.savedPlaces.filter((place) => isInsideWuhan(place.location)),
+        itinerary: trip.itinerary.map((day) => ({
+          ...day,
+          stops: day.stops.filter((stop) => isInsideWuhan(stop.place.location)),
+        })),
+      };
+      const safeSelected = selected && isInsideWuhan(selected.location) ? selected : null;
       const task =
         mode === "optimize"
-          ? await api.optimize(trip, selected)
-          : await api.plan(trip, selected);
+          ? await api.optimize(eligibleTrip, safeSelected)
+          : await api.plan(eligibleTrip, safeSelected);
       setPlanningTask(task);
       setCandidateBase(task.baseRevision);
       track(
@@ -614,6 +831,10 @@ function App() {
       setNotice("请等待规划完成或取消");
       return;
     }
+    if (candidate.days.some((day) => day.stops.some((stop) => !isInsideWuhan(stop.place.location)))) {
+      setNotice("该方案包含武汉市范围外或缺少有效坐标的地点，不能保存为当前行程。");
+      return;
+    }
     if (
       candidate.warnings.some((warning) =>
         /固定时间|未找到明确要求|必去地点超过/.test(warning),
@@ -642,8 +863,12 @@ function App() {
       inform(error);
     }
   };
-  const addStop = (place: Place, day: number) =>
-    change(`将${place.name}加入第${day + 1}天`, (draft) => {
+  const addStop = (place: Place, day: number) => {
+    if (!isInsideWuhan(place.location)) {
+      setNotice("只能将武汉市行政区域内且坐标有效的地点加入行程。");
+      return;
+    }
+    return change(`将${place.name}加入第${day + 1}天`, (draft) => {
       const target = draft.itinerary[day];
       if (!target) return;
       target.stops.push({
@@ -665,6 +890,7 @@ function App() {
         (item) => item.placeId !== place.placeId,
       );
     });
+  };
   const removeStop = (day: number, stopId: string) =>
     change("移除行程地点", (draft) => {
       const target = draft.itinerary[day];
@@ -682,7 +908,7 @@ function App() {
         "地点已调整，交通时间需重新核对。",
       ];
       if (
-        removed &&
+        removed && isInsideWuhan(removed.place.location) &&
         !draft.pendingPlaces.some(
           (item) => item.placeId === removed.place.placeId,
         )
@@ -735,6 +961,14 @@ function App() {
     return recoverItinerary(document);
   }, [routeDocumentData, routeDays]);
   const selectPlace = (place: Place | null) => {
+    if (place && !regionReady) {
+      setNotice("武汉行政边界尚未加载完成，暂时不能选择地点。");
+      return;
+    }
+    if (place && !isInsideWuhan(place.location)) {
+      setNotice("该历史地点位于武汉市行政区域外，已保留原数据但不能继续选择。");
+      return;
+    }
     setSelected(place);
     if (!place) return;
     const days = selectedCandidate?.days || trip?.itinerary || [];
@@ -778,42 +1012,31 @@ function App() {
   void progress; void cancelPlan; void adopt; void addStop; void removeStop; void moveStop; void handleExport;
   if (page === "wizard")
     return (
-      <Wizard
-        onBack={() => setPage("dashboard")}
-        onFinish={(preferences) => create(false, preferences)}
-      />
+      <>
+        <Wizard amapJsKey={serviceStatus?.amap.jsKey || ""} amapConfigRevision={serviceStatus?.amap.revision || "legacy"} webServiceConfigured={serviceStatus?.amap.webServiceConfigured || false} onRequireAmapWebService={(action) => { void requireService("amapWeb", action); }} onBack={() => setPage("dashboard")} onFinish={(preferences) => create(false, preferences)} />
+        {serviceSettingsOpen && <ServiceSettings key={serviceSettingsTab} initialService={serviceSettingsTab} requireAmapWebService={serviceSettingsRequiresWeb} status={serviceStatus} onClose={closeServiceSettings} onSaved={onServiceSaved} />}
+      </>
     );
   if (page === "dashboard" || !trip)
     return (
-      <LandingPage
-        trips={trips}
-        onOpen={openTrip}
-        onExplore={() => create(true)}
-        onPlan={() => setPage("wizard")}
-        onRename={(target, name) =>
-          mutateTrip(target.id, "重命名旅行", (draft) => {
-            draft.name = name;
-            draft.nameSource = "manual";
-          }).catch(inform)
-        }
-        onCopy={(target) =>
-          duplicateTrip(target)
-            .then((copy) => setNotice(`已复制「${copy.name}」`))
-            .catch(inform)
-        }
-        onDelete={(target) => {
-          if (window.confirm(`确定删除「${target.name}」？此操作无法撤销。`))
-            deleteTrip(target)
-              .then(() => debounceCleanup())
-              .catch(inform);
-        }}
-        onAsk={(question) => {
-          landingQuestion.current = question;
-          const latest = [...trips].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
-          if (latest) openTrip(latest);
-          else void create(true);
-        }}
-      />
+      <>
+        <LandingPage
+          currentTrip={currentTrip}
+          onOpen={openTrip}
+          onPlan={() => { void requireService("amap", () => setPage("wizard")); }}
+          onAsk={(question) => {
+            assistantTriggerRef.current = document.activeElement as HTMLElement;
+            setAssistantOpen(true);
+            void sendChat(question);
+          }}
+          onOpenAssistant={() => { assistantTriggerRef.current = document.activeElement as HTMLElement; setAssistantOpen(true); }}
+          onOpenServices={() => openServiceSettings("amap")}
+            services={serviceStatus}
+        />
+        {serviceSettingsOpen && <ServiceSettings key={serviceSettingsTab} initialService={serviceSettingsTab} requireAmapWebService={serviceSettingsRequiresWeb} status={serviceStatus} onClose={closeServiceSettings} onSaved={onServiceSaved} />}
+        <AssistantDrawer open={assistantOpen} closeRef={drawerCloseRef} messages={conversation} selected={null} modelConfigured={modelConfigured} hasTrip={!!currentTrip} onClose={() => setAssistantOpen(false)} onSend={(message) => void sendChat(message)} onRetry={(message) => void retryMessage(message)} onIntro={(place) => void introPlace(place)}/>
+        <AssistantDrawerHandle open={assistantOpen} onToggle={() => { assistantTriggerRef.current = document.activeElement as HTMLElement; setAssistantOpen(value => !value); }} />
+      </>
     );
   return (
     <div className="app-shell">
@@ -822,20 +1045,16 @@ function App() {
           <button
             className="back-button"
             onClick={backToDashboard}
-            aria-label="返回旅行列表"
+            aria-label="返回初始页"
           >
             <IconArrowLeft size={20} />
           </button>
           <div className="brand">
-            <span className="brand-mark small">
-              <IconCompass size={17} />
-            </span>
-            <span>漫游武汉</span>
+            <span className="workspace-author">Made By Kris Han</span>
           </div>
           <span className="header-divider" />
           <span className="trip-title">
             {trip.name}
-            <IconChevronDown size={16} />
           </span>
         </div>
         <div className="workspace-head-right">
@@ -861,6 +1080,7 @@ function App() {
             <span className="status-dot" />
             已保存到本地
           </span>
+          <button className="header-tool" type="button" onClick={() => openServiceSettings("amap")}>服务连接</button>
           <button
             className="icon-button"
             title={fullscreen ? "退出全屏" : "全屏"}
@@ -901,6 +1121,9 @@ function App() {
                 : "探索武汉"
           }
           onMapError={setNotice}
+          amapJsKey={serviceStatus?.amap.jsKey || ""}
+          amapConfigRevision={serviceStatus?.amap.revision || "legacy"}
+          onRequireAmapWebService={(action) => { void requireService("amapWeb", action); }}
         />
         <div
           className="split-handle"
@@ -932,7 +1155,7 @@ function App() {
               onClick={() => setRightTab("assistant")}
             >
               <IconSparkles size={18} />
-              AI 助手
+              AI 接待员
             </button>
             <button
               role="tab"
@@ -947,7 +1170,7 @@ function App() {
           </div>
           {rightTab === "assistant" ? (
             <AssistantPanel
-              messages={trip.messages}
+              messages={conversation}
               selected={selected}
               modelConfigured={modelConfigured}
               onSend={sendChat}
@@ -957,6 +1180,7 @@ function App() {
           ) : rightTab === "must-visit" ? <MustVisitPanel places={trip.pendingPlaces} onSelect={selectPlace} onRemove={(place) => change(`移除必去地点${place.name}`, draft => { draft.pendingPlaces = draft.pendingPlaces.filter(item => item.placeId !== place.placeId); })} onGenerate={openGenerator} /> : <GeneratedDocument document={(trip.generatedItineraries || []).find(item => item.id === rightTab)} routeActive={routeDocumentId === rightTab} onToggleRoute={() => setRouteDocumentId(current => current === rightTab ? null : rightTab)} />}
         </aside>
       </div>
+      {serviceSettingsOpen && <ServiceSettings key={serviceSettingsTab} initialService={serviceSettingsTab} requireAmapWebService={serviceSettingsRequiresWeb} status={serviceStatus} onClose={closeServiceSettings} onSaved={onServiceSaved} />}
       <div className="mobile-nav">
         <button
           onClick={() => setRightTab("assistant")}
@@ -981,9 +1205,9 @@ function App() {
           旅行
         </button>
       </div>
-      {notice && (
+      {visibleNotice && (
         <div className="toast" role="status">
-          <span>{notice}</span>
+          <span>{visibleNotice}</span>
           <button onClick={() => setNotice(null)} aria-label="关闭提示">
             ×
           </button>
@@ -1027,7 +1251,7 @@ function GeneratedDocument({document,routeActive,onToggleRoute}: {document?: Gen
   const exportPdf = async () => {
     const popup = window.open("", "_blank");
     if (!popup) { window.alert("请允许弹出打印窗口"); return; }
-    const html = renderToStaticMarkup(<ReactMarkdown remarkPlugins={[remarkGfm]}>{document.markdown}</ReactMarkdown>);
+    const html = renderToStaticMarkup(<MarkdownContent>{document.markdown}</MarkdownContent>);
     const title = document.title.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
     popup.document.open();
     popup.document.write(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${title}</title><style>
@@ -1040,7 +1264,7 @@ function GeneratedDocument({document,routeActive,onToggleRoute}: {document?: Gen
     popup.focus(); popup.print();
   };
   const exportMarkdown = () => { const url = URL.createObjectURL(new Blob([document.markdown], {type:"text/markdown;charset=utf-8"})); const link = Object.assign(window.document.createElement("a"), {href:url, download:`${document.title}.md`}); link.click(); URL.revokeObjectURL(url); };
-  return <article className="generated-document"><div className="document-actions"><button className={`route-connect-button ${routeActive ? "active" : ""}`} aria-pressed={routeActive} onClick={onToggleRoute}><IconRoute size={16}/>{routeActive ? "关闭路线连线" : "路线连线"}</button><button onClick={exportMarkdown}>导出 Markdown</button><button onClick={exportPdf}>导出 PDF</button></div><div className="markdown-content"><ReactMarkdown remarkPlugins={[remarkGfm]}>{document.markdown}</ReactMarkdown></div></article>;
+  return <article className="generated-document"><div className="document-actions"><button className={`route-connect-button ${routeActive ? "active" : ""}`} aria-pressed={routeActive} onClick={onToggleRoute}><IconRoute size={16}/>{routeActive ? "关闭路线连线" : "路线连线"}</button><button onClick={exportMarkdown}>导出 Markdown</button><button onClick={exportPdf}>导出 PDF</button></div><MarkdownContent>{document.markdown}</MarkdownContent></article>;
 }
 
 export default App;

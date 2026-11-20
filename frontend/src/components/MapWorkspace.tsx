@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { load } from "@amap/amap-jsapi-loader";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { loadAMap } from "../lib/amapLoader";
+import { MarkdownContent } from "./MarkdownContent";
 import {
   IconArrowUpRight,
   IconCheck,
@@ -13,8 +12,9 @@ import {
   IconSparkles,
   IconX,
 } from "@tabler/icons-react";
-import { api, personalPlaceKey, personalPlaceToPlace, type PersonalMapPlace, type PlaceInfo } from "../lib/api";
+import { api, apiBase, personalPlaceKey, personalPlaceToPlace, type PersonalMapPlace, type PlaceInfo } from "../lib/api";
 import { createMapExplorer } from "../lib/mapExplorer";
+import { getWuhanBoundary, getWuhanBounds, isInsideWuhan } from "../lib/wuhanBoundary";
 import type { DayPlan, Place, Trip } from "../types";
 import { clusterRouteStops, ROUTE_DAY_COLORS, sequenceStops, type RouteSequenceStop } from "../lib/routeClusters";
 
@@ -29,12 +29,15 @@ type Props = {
   routeFocus: boolean;
   routeLabel: string;
   onMapError: (message: string) => void;
+  amapJsKey: string;
+  amapConfigRevision: string;
+  onRequireAmapWebService: (action: () => void) => void;
 };
 type MapControl = {
   on: (event: string, handler: (event: MapEvent) => void) => void;
   off: (event: string, handler: (event: MapEvent) => void) => void;
   setCenter: (point: number[]) => void;
-  setZoom: (zoom: number) => void;
+  setZoom: (zoom: number, immediately?: boolean) => void;
   getZoom: () => number;
   destroy: () => void;
   add: (items: unknown[]) => void;
@@ -43,12 +46,13 @@ type MapControl = {
   resize: () => void;
   lngLatToContainer: (point: unknown) => { x: number; y: number };
   setFitView: (targets?: unknown[], immediately?: boolean, padding?: number[]) => void;
+  setZooms: (zooms: [number, number]) => void;
+  setMask: (mask: number[][][][]) => void;
+  setLimitBounds: (bounds: unknown) => void;
 };
 type MapEvent = { id?: string; name?: string; lnglat?: { lng: number; lat: number } };
 type Discovery = { places: Place[]; note: string };
 type PlaceStatus = "itinerary" | "pending" | "saved" | "preview" | "normal";
-const jsKey = import.meta.env.VITE_AMAP_JS_KEY as string | undefined;
-
 function MapCanvas({
   places,
   selected,
@@ -57,6 +61,8 @@ function MapCanvas({
   routeFocus,
   statusById,
   onError,
+  amapJsKey,
+  amapConfigRevision,
   onDiscoverStart,
   onDiscoverResult,
 }: {
@@ -67,13 +73,17 @@ function MapCanvas({
   routeFocus: boolean;
   statusById: Record<string, PlaceStatus>;
   onError: (message: string) => void;
+  amapJsKey: string;
+  amapConfigRevision: string;
   onDiscoverStart: () => void;
   onDiscoverResult: (result: Discovery) => void;
 }) {
   const element = useRef<HTMLDivElement>(null);
   const [ready, setReady] = useState(false);
+  const [mapStatus, setMapStatus] = useState("正在加载武汉地图…");
+  const outsideMaskPath = useRef<SVGPathElement | null>(null);
   const mapRef = useRef<MapControl | null>(null);
-  const amapRef = useRef<Awaited<ReturnType<typeof load>> | null>(null);
+  const amapRef = useRef<Awaited<ReturnType<typeof loadAMap>> | null>(null);
   const overlays = useRef<unknown[]>([]);
   const routeOverlays = useRef<unknown[]>([]);
   const [drawerItems, setDrawerItems] = useState<RouteSequenceStop[]>([]);
@@ -81,6 +91,7 @@ function MapCanvas({
   const startRef = useRef(onDiscoverStart);
   const resultRef = useRef(onDiscoverResult);
   const requestId = useRef(0);
+  const previousMapRevision = useRef("");
   const clickTimer = useRef<number | null>(null);
   const suppressUntil = useRef(0);
   useEffect(() => {
@@ -89,32 +100,58 @@ function MapCanvas({
     resultRef.current = onDiscoverResult;
   }, [onSelect, onDiscoverStart, onDiscoverResult]);
   useEffect(() => {
-    if (!jsKey || !element.current) return;
+    if (!amapJsKey || !element.current) return;
     let active = true;
     let detach: (() => void) | null = null;
+    setMapStatus("正在加载武汉地图…");
     const win = window as typeof window & {
       _AMapSecurityConfig?: { securityJsCode?: string; serviceHost?: string };
     };
-    if (import.meta.env.VITE_AMAP_SERVICE_HOST) {
-      win._AMapSecurityConfig = {
-        serviceHost: import.meta.env.VITE_AMAP_SERVICE_HOST,
-      };
-    } else if (import.meta.env.VITE_AMAP_SECURITY_CODE) {
-      win._AMapSecurityConfig = {
-        securityJsCode: import.meta.env.VITE_AMAP_SECURITY_CODE,
-      };
-    }
-    load({ key: jsKey, version: "2.0", plugins: ["AMap.Scale", "AMap.PlaceSearch", "AMap.Geocoder"] })
-      .then((AMap) => {
+    win._AMapSecurityConfig = { serviceHost: apiBase + "/_AMapService" };
+    const forceLoaderReset = !!previousMapRevision.current && previousMapRevision.current !== amapConfigRevision;
+    previousMapRevision.current = amapConfigRevision;
+    loadAMap(amapJsKey, ["AMap.Scale", "AMap.PlaceSearch", "AMap.Geocoder"], forceLoaderReset)
+      .then(async (AMap) => {
         if (!active || !element.current) return;
+        setMapStatus("正在加载武汉地图…");
+        const boundary = getWuhanBoundary();
+        if (!active || !element.current) return;
+        const bounds = getWuhanBounds();
+        if (!bounds) throw new Error("武汉市行政边界数据无效，地点选择已暂停。");
+        // AMap's mask accepts a list of independent polygon paths. Keep each shell
+        // separate; the live viewport mask below also cuts any interior rings.
+        const paths = boundary.polygons.map((polygon) => [polygon[0]]);
         amapRef.current = AMap;
         mapRef.current = new AMap.Map(element.current, {
           center: [114.3055, 30.5928],
-          zoom: 11.6,
+          zoom: 8,
+          zooms: [5, 18],
+          viewMode: "3D",
+          pitch: 0,
+          rotation: 0,
+          rotateEnable: false,
+          pitchEnable: false,
+          mask: paths,
           mapStyle: "amap://styles/normal",
           showLabel: true,
           isHotspot: true,
+          showIndoorMap: false,
+          showBuildingBlock: false,
+          backgroundColor: "#0b1213",
         }) as MapControl;
+        mapRef.current.setMask(paths);
+        const southWest = new AMap.LngLat(bounds.west, bounds.south);
+        const northEast = new AMap.LngLat(bounds.east, bounds.north);
+        mapRef.current.setLimitBounds(new AMap.Bounds(southWest, northEast));
+        const maskOutlines = boundary.rings.map((ring) => new AMap.Polygon({
+          path: ring,
+          strokeColor: "#c4ed88",
+          strokeWeight: 1.25,
+          strokeOpacity: 0.9,
+          fillOpacity: 0,
+          zIndex: 180,
+        }));
+        mapRef.current.add(maskOutlines);
         mapRef.current.addControl(new AMap.Scale());
         const explorer = createMapExplorer(AMap);
         const point = (event: MapEvent) => event.lnglat &&
@@ -135,11 +172,11 @@ function MapCanvas({
           clickTimer.current = null;
           suppressUntil.current = Date.now() + 350;
           const location = point(event);
-          if (event.id && location) discover(() => explorer.hotspot(event.id!, event.name || "地图地点", location));
+          if (event.id && location && isInsideWuhan(location)) discover(() => explorer.hotspot(event.id!, event.name || "地图地点", location));
         };
         const onClick = (event: MapEvent) => {
           const location = point(event);
-          if (!location || Date.now() < suppressUntil.current) return;
+          if (!location || !isInsideWuhan(location) || Date.now() < suppressUntil.current) return;
           if (clickTimer.current !== null) window.clearTimeout(clickTimer.current);
           clickTimer.current = window.setTimeout(() => {
             clickTimer.current = null;
@@ -154,16 +191,68 @@ function MapCanvas({
         mapRef.current.on("hotspotclick", onHotspot);
         mapRef.current.on("click", onClick);
         for (const event of ["dragstart", "dragend", "zoomstart", "zoomend"]) mapRef.current.on(event, onGesture);
+        let lastFitZoom: number | null = null;
+        const updateViewLimits = () => {
+          const rect = element.current?.getBoundingClientRect();
+          if (!rect || rect.width < 100 || rect.height < 100) return null;
+          const mercatorY = (lat: number) => Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360));
+          const worldWidth = (bounds.east - bounds.west) / 360 * 256;
+          const worldHeight = (mercatorY(bounds.north) - mercatorY(bounds.south)) / (2 * Math.PI) * 256;
+          const fit = Math.log2(Math.min((rect.width - 96) / worldWidth, (rect.height - 96) / worldHeight));
+          const minZoom = Math.max(4, Math.min(14, Math.round((fit - 0.25) * 10) / 10));
+          const atPreviousFit = lastFitZoom !== null && Math.abs((mapRef.current?.getZoom() || 0) - lastFitZoom) < 0.08;
+          mapRef.current?.setZooms([minZoom, 18]);
+          if (mapRef.current && (mapRef.current.getZoom() < minZoom || atPreviousFit))
+            mapRef.current.setZoom(Math.max(minZoom, Math.min(18, fit)), true);
+          lastFitZoom = fit;
+          return fit;
+        };
+        const fitZoom = updateViewLimits();
+        const centerLng = (bounds.west + bounds.east) / 2;
+        const centerLat = (bounds.south + bounds.north) / 2;
+        mapRef.current.setCenter([centerLng, centerLat]);
+        if (fitZoom !== null) mapRef.current.setZoom(fitZoom, true);
+        const resizeLimits = () => updateViewLimits();
+        mapRef.current.on("resize", resizeLimits);
         const map = mapRef.current;
+        let outsideMaskFrame: number | null = null;
+        const drawOutsideMask = () => {
+          const host = element.current;
+          if (!host || !outsideMaskPath.current || !map) return;
+          const width = host.clientWidth;
+          const height = host.clientHeight;
+          const rings = boundary.rings.map((ring) => ring.map(([lng, lat]) => {
+            const pixel = map.lngLatToContainer([lng, lat]);
+            return `${pixel.x.toFixed(2)} ${pixel.y.toFixed(2)}`;
+          }).join(" L"));
+          const paths = rings.map((points) => `M${points} Z`).join(" ");
+          outsideMaskPath.current.setAttribute("d", `M0 0 H${width} V${height} H0 Z ${paths}`);
+        };
+        const updateOutsideMask = () => {
+          if (outsideMaskFrame !== null) return;
+          outsideMaskFrame = window.requestAnimationFrame(() => {
+            outsideMaskFrame = null;
+            drawOutsideMask();
+          });
+        };
+        drawOutsideMask();
+        for (const event of ["mapmove", "zoomchange", "resize"]) map.on(event, updateOutsideMask);
         detach = () => {
           map?.off("hotspotclick", onHotspot);
           map?.off("click", onClick);
           for (const event of ["dragstart", "dragend", "zoomstart", "zoomend"]) map?.off(event, onGesture);
+          map?.off("resize", resizeLimits);
+          for (const event of ["mapmove", "zoomchange", "resize"]) map?.off(event, updateOutsideMask);
+          if (outsideMaskFrame !== null) window.cancelAnimationFrame(outsideMaskFrame);
         };
         setReady(true);
       })
-      .catch(() => {
-        if (active) onError("高德地图加载失败，请检查 JS Key、域名白名单与安全密钥");
+      .catch((error) => {
+        if (active) {
+          const message = error instanceof Error ? error.message : "高德地图加载失败，请检查 JS Key、域名白名单与安全密钥";
+          setMapStatus(message);
+          onError(message);
+        }
       });
     return () => {
       active = false;
@@ -174,7 +263,7 @@ function MapCanvas({
       mapRef.current = null;
       setReady(false);
     };
-  }, [onError]);
+  }, [amapJsKey, amapConfigRevision, onError]);
   useEffect(() => {
     const map = mapRef.current,
       AMap = amapRef.current;
@@ -323,7 +412,7 @@ function MapCanvas({
   }, [ready, routeFocus, routeDays]);
 
   useEffect(() => {
-    if (selected && mapRef.current) {
+    if (selected && isInsideWuhan(selected.location) && mapRef.current) {
       mapRef.current.setCenter([selected.location.lng, selected.location.lat]);
       mapRef.current.setZoom(Math.max(mapRef.current.getZoom(), 13));
     }
@@ -333,7 +422,7 @@ function MapCanvas({
     const observer = new ResizeObserver(() => mapRef.current?.resize());
     observer.observe(element.current);
     return () => observer.disconnect();
-  }, []);
+  }, [amapJsKey]);
   useEffect(() => {
     const zoom = (event: Event) => {
       const detail = (event as CustomEvent<number>).detail;
@@ -343,7 +432,7 @@ function MapCanvas({
     document.addEventListener("map-zoom", zoom);
     return () => document.removeEventListener("map-zoom", zoom);
   }, []);
-  if (!jsKey) {
+  if (!amapJsKey) {
     const positioned: { x: number; y: number }[] = [];
     const pins = places.map((place) => {
       let x = Math.max(
@@ -399,6 +488,10 @@ function MapCanvas({
   return (
     <>
       <div ref={element} className="amap-canvas" aria-label="武汉高德地图" />
+      <svg className="wuhan-outside-mask" aria-hidden="true" preserveAspectRatio="none">
+        <path ref={outsideMaskPath} fill="#0b1213" fillRule="evenodd" />
+      </svg>
+      {!ready && <div className="map-region-loading" role="status">{mapStatus}</div>}
       {routeFocus && drawerItems.length > 1 && (
         <div className="route-cluster-drawer" role="group" aria-label="合并的行程地点">
           <div className="route-cluster-drawer-head"><strong>合并站点 · {drawerItems.length} 次停靠</strong><button type="button" onClick={() => setDrawerItems([])} aria-label="关闭站点抽屉"><IconX size={16}/></button></div>
@@ -421,6 +514,9 @@ export function MapWorkspace({
   routeFocus,
   routeLabel,
   onMapError,
+  amapJsKey,
+  amapConfigRevision,
+  onRequireAmapWebService,
 }: Props) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Place[]>([]);
@@ -439,6 +535,16 @@ export function MapWorkspace({
   const [candidates, setCandidates] = useState<Place[]>([]);
   const discoveryCancelled = useRef(false);
   const personalTrip = useMemo(() => ({ id: trip.id, secret: trip.secret }), [trip.id, trip.secret]);
+  const safeRouteDays = useMemo(() => routeDays.map((day) => {
+    const stops = day.stops.filter((stop) => isInsideWuhan(stop.place.location));
+    const stopIds = new Set(stops.map((stop) => stop.id));
+    return {
+      ...day,
+      stops,
+      legs: day.legs.filter((leg) => stopIds.has(leg.fromStopId) && stopIds.has(leg.toStopId) &&
+        leg.polyline.every((point) => isInsideWuhan(point))),
+    };
+  }), [routeDays]);
   useEffect(() => {
     const id = ++infoRequestId.current;
     infoController.current?.abort();
@@ -471,6 +577,10 @@ export function MapWorkspace({
     return () => { active = false; };
   }, [personalTrip]);
   const select = (place: Place | null) => {
+    if (place && !isInsideWuhan(place.location)) {
+      onMapError("该地点不在武汉市行政区域内，不能作为武汉旅行地点。");
+      return;
+    }
     discoveryCancelled.current = true;
     setDiscovering(false);
     setCandidates([]);
@@ -485,6 +595,10 @@ export function MapWorkspace({
     if (result.places.length === 1) onSelect(result.places[0]);
   };
   const togglePersonal = async (place: Place) => {
+    if (!isInsideWuhan(place.location)) {
+      setPersonalError("该地点不在武汉市行政区域内，不能加入个人收藏。");
+      return;
+    }
     if (personalBusy || personalLoading || personalError) return;
     setPersonalBusy(true);
     try {
@@ -530,7 +644,7 @@ export function MapWorkspace({
     itinerary: trip.itinerary.flatMap((day) =>
       day.stops.map((stop) => stop.place),
     ),
-    route: routeDays.flatMap((day) => day.stops.map((stop) => stop.place)),
+    route: safeRouteDays.flatMap((day) => day.stops.map((stop) => stop.place)),
   });
   const { places, statusById } = useMemo(() => {
     const data = JSON.parse(markerInput) as {
@@ -560,25 +674,31 @@ export function MapWorkspace({
       if (!status[place.placeId]) status[place.placeId] = "preview";
     });
     return {
-      places: [...new Map(all.map((place) => [place.placeId, place])).values()],
+      places: [...new Map(all.filter((place) => isInsideWuhan(place.location)).map((place) => [place.placeId, place])).values()],
       statusById: status,
     };
   }, [markerInput]);
-  const submit = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!query.trim()) return;
+  const runSearch = async (searchQuery: string) => {
     setSearching(true);
     setSearchOpen(true);
     try {
-      const data = await api.search(query.trim());
-      setResults(data.places);
+      const data = await api.search(searchQuery);
+      const localPlaces = data.places.filter((place) => isInsideWuhan(place.location));
+      setResults(localPlaces);
       setSearchNote(data.source);
-      if (data.places[0]) select(data.places[0]);
+      if (localPlaces[0]) select(localPlaces[0]);
+      else setSearchNote("未找到武汉市范围内的相关地点。");
     } catch (error) {
       setSearchNote(error instanceof Error ? error.message : "搜索失败");
     } finally {
       setSearching(false);
     }
+  };
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault();
+    const searchQuery = query.trim();
+    if (!searchQuery) return;
+    onRequireAmapWebService(() => { void runSearch(searchQuery); });
   };
   const isPending =
     selected &&
@@ -588,9 +708,11 @@ export function MapWorkspace({
     <section className="map-workspace" aria-label="地图与地点搜索">
       <MapCanvas
         places={places}
+        amapJsKey={amapJsKey}
+        amapConfigRevision={amapConfigRevision}
         selected={selected}
         onSelect={select}
-        routeDays={routeDays}
+        routeDays={safeRouteDays}
         routeFocus={routeFocus}
         statusById={statusById}
         onError={onMapError}
@@ -652,7 +774,7 @@ export function MapWorkspace({
               <p className="search-empty">
                 {searching
                   ? "正在查找地点…"
-                  : "没有找到地点，请试试其他关键词。"}
+                  : "未找到武汉市范围内的相关地点。"}
               </p>
             )}
             <div className="search-source">{searchNote}</div>
@@ -695,7 +817,7 @@ export function MapWorkspace({
       )}
       <div className="map-bottom">
         <div className="map-attribution">
-          {jsKey ? "© 高德地图 · 数据仅供行程参考" : "示意视图 · 坐标仅供参考"}
+          {amapJsKey ? "© 高德地图 · 行政边界 © OpenStreetMap contributors (ODbL 1.0)" : "示意视图 · 坐标仅供参考"}
         </div>
         <div className="map-zoom">
           <button
@@ -750,7 +872,7 @@ export function MapWorkspace({
             <div className="place-info-heading"><strong>本地知识库 · 开放时间</strong></div>
             <small>最后核查：{new Date(placeInfo.fields.openingHours.checkedAt || placeInfo.checkedAt).toLocaleString("zh-CN")}</small>
             <dl><div><dt>开放时间</dt><dd>{placeInfo.fields.openingHours.value} {placeInfo.sources[placeInfo.fields.openingHours.sourceId - 1]?.url && <a href={placeInfo.sources[placeInfo.fields.openingHours.sourceId - 1].url} target="_blank" rel="noopener noreferrer">[核实来源]</a>}</dd></div></dl>
-            {placeInfo.introduction && <div className="place-info-intro"><h4>地点介绍与游览建议</h4><ReactMarkdown remarkPlugins={[remarkGfm]}>{placeInfo.introduction}</ReactMarkdown></div>}
+            {placeInfo.introduction && <div className="place-info-intro"><h4>地点介绍与游览建议</h4><MarkdownContent>{placeInfo.introduction}</MarkdownContent></div>}
             {placeInfo.sources.length > 0 && <div className="place-info-sources"><h4>信息来源</h4>{placeInfo.sources.map((source,index) => <p key={source.url}><a href={source.url} target="_blank" rel="noopener noreferrer">[{index+1}] {source.title}</a> {source.official ? "官方" : "第三方"} · {source.publishedAt ? `发布 ${source.publishedAt.slice(0,10)}` : "发布时间未标明"}</p>)}</div>}
           </div>}
           <div className="place-actions">

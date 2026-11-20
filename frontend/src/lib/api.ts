@@ -40,6 +40,11 @@ export type PlaceInfo = {
 
 const tripHeaders = (trip: Pick<Trip, "id" | "secret">) => ({ "X-Trip-ID": trip.id, "X-Trip-Secret": trip.secret });
 
+export type ServiceStatus = {
+  amap: { configured: boolean; webServiceConfigured: boolean; jsKey: string; revision: string };
+  ai: { configured: boolean; provider: "deepseek" | "openai"; model: string; models: { deepseek: string; openai: string }; availableProviders: { deepseek: boolean; openai: boolean } };
+};
+
 export const personalPlaceKey = (place: Place) => {
   const poiId = place.poiId || (place.placeId.startsWith("coord:") || place.placeId.startsWith("featured-") ? null : place.placeId);
   return poiId ? `poi:${poiId}` : `coord:${place.location.lng.toFixed(6)},${place.location.lat.toFixed(6)}`;
@@ -87,6 +92,13 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  servicesStatus: () => request<ServiceStatus>("/services/status"),
+  saveAmapConfig: (config: { jsKey: string; securityCode: string; webServiceKey: string }) =>
+    request<ServiceStatus>("/services/amap", { method: "POST", body: JSON.stringify(config) }),
+  saveAIConfig: (config: { provider: "deepseek" | "openai"; apiKey: string; model: string }) =>
+    request<ServiceStatus>("/services/ai", { method: "POST", body: JSON.stringify(config) }),
+  removeServiceConfig: (service: "amap" | "ai") =>
+    request<ServiceStatus>("/services/" + service, { method: "DELETE" }),
   health: () =>
     request<{ ok: boolean; amapConfigured: boolean; modelConfigured: boolean }>(
       "/health",

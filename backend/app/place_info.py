@@ -27,7 +27,7 @@ SEARCH_ENDPOINT = "https://api.deepseek.com/v1/tools/search"
 FETCH_ENDPOINT = "https://api.deepseek.com/v1/tools/fetch"
 CACHE_TTL = timedelta(hours=12)
 FAILURE_CACHE_TTL = timedelta(minutes=5)
-PLACE_INFO_CACHE_VERSION = "v3"
+PLACE_INFO_CACHE_VERSION = "v5"
 MAX_SOURCES = 12
 MAX_FETCHES = 10
 MAX_PAGE_CHARS = 10000
@@ -494,6 +494,8 @@ def _introduction_prompt() -> str:
         "网页证据支持的具体事实用[来源编号]标注。关键历史细节若仅来自模型已有知识、未被本次网页资料支持，"
         "请用自然的短语说明这是背景知识、尚未由本次网页资料独立核实。"
         "明确区分事实、合理解释和游览建议。不要把网页搜索摘要伪装成Fetch正文。"
+        "较长介绍可用二级标题划分历史、特色、参观建议；简单内容直接回答，不强行分段，也不机械生成固定数量标题。"
+        "涉及时间、票价、预约和开放限制时，明确区分已核实与未核实信息；不要为了排版编造事实。"
         "开放时间、今日状态、门票、优惠、预约、电话等动态信息只能依据本次提供的近期可靠证据；"
         "没有可靠证据就不要猜测，也不要在介绍中给出猜测值。"
         "返回严格JSON对象，字段为：introduction（字符串）、fields（对象）、conflicts（数组）。"
@@ -596,6 +598,22 @@ async def _get_place_info_locked(place: Place, refresh: bool, key: str) -> dict:
             old = None
 
     checked_at = _now().isoformat()
+    if settings.ai_provider.lower() == "openai":
+        if not settings.openai_api_key:
+            return _failure(place, checked_at, old, "未配置 OPENAI_API_KEY")
+        generated = await _model(
+            "只根据用户提供的地点基本信息撰写简短、保守的介绍。不要声称查阅了网页，不要编造营业时间、价格、电话、预约方式或实时信息。若描述不足，只介绍地点名称和类别，并注明具体信息尚未核实。",
+            json.dumps({"name": place.name, "category": place.category, "address": place.address, "description": place.description}, ensure_ascii=False),
+        )
+        if not generated:
+            return _failure(place, checked_at, old, "OpenAI 服务暂不可用")
+        payload = {
+            "status": "partial", "checkedAt": checked_at, "fields": {}, "sources": [],
+            "introduction": generated,
+            "conflict": "", "stale": False, "cached": False,
+        }
+        await asyncio.to_thread(_write_cache, key, payload, checked_at)
+        return payload
     if not settings.deepseek_api_key:
         return _failure(place, checked_at, old, "未配置 DEEPSEEK_API_KEY")
 

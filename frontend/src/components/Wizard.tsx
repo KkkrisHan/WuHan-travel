@@ -13,8 +13,12 @@ import { HotelPicker } from "./HotelPicker";
 import type { Preferences } from "../types";
 
 type Props = {
+  amapJsKey: string;
+  amapConfigRevision: string;
+  webServiceConfigured: boolean;
   onBack: () => void;
   onFinish: (preferences: Preferences) => void;
+  onRequireAmapWebService: (action: () => void) => void;
 };
 const interests = [
   "历史人文",
@@ -48,7 +52,7 @@ const steps = [
   },
 ];
 
-export function Wizard({ onBack, onFinish }: Props) {
+export function Wizard({ amapJsKey, amapConfigRevision, webServiceConfigured, onBack, onFinish, onRequireAmapWebService }: Props) {
   const [step, setStep] = useState(0);
   const [value, setValue] = useState<Preferences>({ ...defaultPreferences });
   const companionChoices = value.company.split("、").filter(Boolean);
@@ -79,10 +83,7 @@ export function Wizard({ onBack, onFinish }: Props) {
     <div className="wizard-page">
       <header className="global-header">
         <button className="brand brand-button" onClick={onBack}>
-          <span className="brand-mark">
-            <IconMapPin size={20} />
-          </span>
-          <span>漫游武汉</span>
+          <span className="workspace-author">Made By Kris Han</span>
         </button>
         <span className="wizard-count">
           旅行设置 / {String(step + 1).padStart(2, "0")} OF {String(steps.length).padStart(2, "0")}
@@ -253,11 +254,15 @@ export function Wizard({ onBack, onFinish }: Props) {
           {step === 3 && (
             <div className="field-stack hotel-field-stack">
               <HotelPicker
+                amapJsKey={amapJsKey}
+                amapConfigRevision={amapConfigRevision}
+                webServiceConfigured={webServiceConfigured}
                 value={value.lodging || ""}
                 location={value.lodgingLocation || null}
                 onChange={(lodging, lodgingLocation) =>
                   setValue((current) => ({ ...current, lodging, lodgingLocation }))
                 }
+                onRequireAmapWebService={onRequireAmapWebService}
               />
             </div>
           )}

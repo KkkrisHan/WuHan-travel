@@ -30,7 +30,7 @@ def relevant_knowledge(question: str) -> dict | None:
     return selected
 
 
-def fallback_answer(knowledge: dict) -> str:
+def fallback_answer(knowledge: dict, include_citations: bool = True) -> str:
     """Answer core questions from the verified facts when no model key is set."""
     lines: list[str] = []
     spu = knowledge.get("spu")
@@ -53,8 +53,10 @@ def fallback_answer(knowledge: dict) -> str:
             f"比赛结束后进行市场测试，成绩为现场表现 40%、市场测试 60%。{saig['participation']} "
             f"{saig['ticketStatus']}"
         )
-    sources = knowledge["sources"]
-    citations = [f"[SAIG 官方网站]({sources['saig']})"]
-    if spu:
-        citations.append(f"[数命科技 / SAIG 官方首页]({sources['home']})")
-    return "\n\n".join(lines) + "\n\n来源：" + " · ".join(citations)
+    if include_citations:
+        sources = knowledge["sources"]
+        citations = [f"[SAIG 官方网站]({sources['saig']})"]
+        if spu:
+            citations.append(f"[数命科技 / SAIG 官方首页]({sources['home']})")
+        lines.append("来源：" + " · ".join(citations))
+    return "\n\n".join(lines)

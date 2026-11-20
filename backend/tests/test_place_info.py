@@ -56,6 +56,10 @@ class PlaceInfoTest(unittest.IsolatedAsyncioTestCase):
         self.settings_patch.start()
         self.key_patch = patch.object(place_info.settings, "deepseek_api_key", "mock-key")
         self.key_patch.start()
+        # These tests exercise the DeepSeek Search/Fetch evidence pipeline, not
+        # the selected text-generation provider used by the rest of the app.
+        self.provider_patch = patch.object(place_info.settings, "ai_provider", "deepseek")
+        self.provider_patch.start()
         self.place = Place(
             placeId="mock-venue-1",
             name="测试景点",
@@ -69,6 +73,7 @@ class PlaceInfoTest(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         place_info._PLACE_LOCKS.clear()
         self.key_patch.stop()
+        self.provider_patch.stop()
         self.settings_patch.stop()
         self.temp.cleanup()
 

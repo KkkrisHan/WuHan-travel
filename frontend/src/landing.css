@@ -83,3 +83,50 @@
   .landing-travel-heading { min-height: unset; padding: 69px 24px 48px; }.landing-travel-heading h2 { font-size: 48px; }.landing-travel .dashboard-main { padding-top: 19px; }
 }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; } }
+
+/* Product shell alignment shared with the travel workspace */
+.landing-nav { gap: 20px; }
+.landing-wordmark { flex: 0 0 auto; color: #c5cec6; font-size: 11px; font-weight: 500; letter-spacing: .025em; }
+.landing-nav-links { margin-left: auto; }
+.landing-assistant-entry { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; padding: 0 11px; border: 1px solid rgba(235,244,235,.16); border-radius: 7px; background: transparent; color: #cbd7cb; font-size: 11px; transition: color .16s, background .16s, border-color .16s; }
+.landing-assistant-entry:hover { border-color: #708464; background: #18221d; color: #fff; }
+.landing-primary { border-radius: 7px; transition: background .16s, transform .16s; }
+.landing-primary:active { transform: scale(.98); }
+.landing-travel { display: grid; grid-template-columns: minmax(0, 1.03fr) minmax(280px, .97fr); align-items: stretch; min-height: 500px; background: #0c1413; }
+.landing-travel-heading { min-height: 0; align-self: center; padding-top: 72px; padding-bottom: 72px; background: none; }
+.landing-travel-heading h2 { font-size: clamp(42px, 5vw, 64px); }
+.landing-travel-heading > p:not(.landing-eyebrow) { max-width: 520px; font-size: 13px; }
+.landing-travel-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 24px; }
+.landing-travel-actions button { min-height: 46px; display: inline-flex; align-items: center; justify-content: center; gap: 10px; padding: 0 17px; border-radius: 7px; font-size: 12px; transition: background .16s, border-color .16s, transform .16s; }
+.landing-travel-actions button:active { transform: scale(.98); }
+.landing-create-trip { border: 1px solid #c4ed88; background: #c4ed88; color: #172017 !important; font-weight: 600; }
+.landing-create-trip:hover { background: #d7f3ae; border-color: #d7f3ae; }
+.landing-current-trip { border: 1px solid rgba(235,244,235,.22); background: #17201c; color: #e1e9df !important; }
+.landing-current-trip:hover { background: #202c25; border-color: #748669; }
+.landing-entry-note { display: block; margin-top: 14px; color: #849188; font-size: 11px; }
+.landing-travel-visual { min-height: 350px; display: flex; flex-direction: column; justify-content: flex-end; gap: 12px; margin: 42px clamp(24px, 7vw, 96px) 42px 0; padding: clamp(24px, 4vw, 48px); border: 1px solid rgba(220,234,222,.14); background: linear-gradient(145deg, rgba(145,173,125,.08), transparent 58%), #111a18; }
+.landing-travel-visual > span { color: #a6b79e; font-size: 11px; }
+.landing-travel-visual > strong { color: #e8efe5; font-size: clamp(28px, 3.4vw, 43px); font-weight: 500; line-height: 1.28; }
+.landing-travel-visual > div { display: flex; align-items: center; gap: 8px; margin-top: 20px; color: #8f9d90; font-size: 11px; }
+.landing-travel-visual i { width: 7px; height: 7px; border-radius: 50%; background: #c4ed88; }
+.landing-travel > .dashboard { display: none; }
+.landing-nav-links button:focus-visible, .landing-assistant-entry:focus-visible,
+.landing-create-trip:focus-visible, .landing-current-trip:focus-visible,
+.landing-primary:focus-visible, .landing-text-link:focus-visible,
+.saig-faq button:focus-visible, .saig-access button:focus-visible {
+  outline: 2px solid #d2f39c; outline-offset: 4px;
+}
+@media (max-width: 760px) {
+  .landing-nav { justify-content: space-between; gap: 8px; padding: 0 14px; }
+  .landing-nav-links { display: none; }
+  .landing-assistant-entry { min-height: 34px; padding: 0 9px; }
+  .landing-hero-content { width: auto; max-width: calc(100% - 48px); margin-right: 24px; margin-left: 24px; }
+  .landing-hero h1 { font-size: clamp(38px, 10vw, 58px); overflow-wrap: anywhere; }
+  .landing-hero-subtitle { max-width: 100%; font-size: 12px; letter-spacing: .04em; }
+  .landing-travel { grid-template-columns: 1fr; }
+  .landing-travel-heading { padding: 64px 24px 30px; }
+  .landing-travel-heading h2 { font-size: 46px; }
+  .landing-travel-visual { min-height: 260px; margin: 0 24px 44px; }
+  .landing-travel-actions { align-items: stretch; flex-direction: column; }
+  .landing-travel-actions button { justify-content: space-between; width: 100%; }
+}

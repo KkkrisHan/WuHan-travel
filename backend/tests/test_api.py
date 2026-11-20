@@ -24,8 +24,19 @@ class ApiTest(unittest.TestCase):
         REQUEST_TIMES.clear()
         self.client_context = TestClient(app)
         self.client = self.client_context.__enter__()
+        self.runtime_patches = [
+            patch.object(settings, "openai_api_key", ""),
+            patch.object(settings, "deepseek_api_key", ""),
+            patch.object(settings, "ai_provider", "openai"),
+            patch.object(settings, "amap_web_service_key", ""),
+            patch.object(settings, "amap_js_security_code", ""),
+        ]
+        for runtime_patch in self.runtime_patches:
+            runtime_patch.start()
 
     def tearDown(self):
+        for runtime_patch in reversed(self.runtime_patches):
+            runtime_patch.stop()
         self.client_context.__exit__(None, None, None)
 
     def wait_task(self, task):

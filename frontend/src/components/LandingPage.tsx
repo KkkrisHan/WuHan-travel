@@ -1,19 +1,18 @@
-import { useEffect, useState } from "react";
-import { IconArrowDown, IconArrowUpRight } from "@tabler/icons-react";
-import { Dashboard } from "./Dashboard";
+import { useEffect, useRef, useState } from "react";
+import { IconArrowDown, IconArrowUpRight, IconMessageCircle } from "@tabler/icons-react";
 import "../landing.css";
 import type { Trip } from "../types";
+import type { ServiceStatus } from "../lib/api";
 import content from "../data/saigKnowledge.json";
 
 type Props = {
-  trips: Trip[];
+  currentTrip?: Trip;
   onOpen: (trip: Trip) => void;
-  onExplore: () => void;
   onPlan: () => void;
-  onRename: (trip: Trip, name: string) => void;
-  onCopy: (trip: Trip) => void;
-  onDelete: (trip: Trip) => void;
   onAsk: (question: string) => void;
+  onOpenAssistant: () => void;
+  onOpenServices: () => void;
+  services: ServiceStatus | null;
 };
 
 const navItems = [
@@ -23,30 +22,69 @@ const navItems = [
   ["travel", "开始旅行"],
 ] as const;
 
-export function LandingPage({ onAsk, ...dashboardProps }: Props) {
+export function LandingPage({ onAsk, currentTrip, onOpen, onPlan, onOpenAssistant, onOpenServices, services }: Props) {
   const [active, setActive] = useState("wuhan");
+  const pendingNavigation = useRef<string | null>(null);
+  const scrollIdleTimer = useRef<number | null>(null);
   useEffect(() => {
     const sections = navItems.map(([id]) => document.getElementById(id)).filter((item): item is HTMLElement => !!item);
     const updateActive = () => {
-      const marker = window.innerHeight * 0.35;
+      const last = sections.at(-1);
+      const atPageBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 2;
+      if (atPageBottom && last) {
+        setActive(last.id);
+        return;
+      }
+      const marker = window.innerHeight * 0.5;
       const current = sections.filter((section) => section.getBoundingClientRect().top <= marker).at(-1);
       setActive(current?.id || sections[0]?.id || "wuhan");
     };
+    const finishNavigation = () => {
+      if (scrollIdleTimer.current !== null) window.clearTimeout(scrollIdleTimer.current);
+      scrollIdleTimer.current = null;
+      if (pendingNavigation.current) {
+        pendingNavigation.current = null;
+        updateActive();
+      }
+    };
+    const onScroll = () => {
+      if (!pendingNavigation.current) {
+        updateActive();
+        return;
+      }
+      setActive(pendingNavigation.current);
+      if (scrollIdleTimer.current !== null) window.clearTimeout(scrollIdleTimer.current);
+      scrollIdleTimer.current = window.setTimeout(finishNavigation, 180);
+    };
+    const onResize = () => {
+      finishNavigation();
+      updateActive();
+    };
     updateActive();
-    window.addEventListener("scroll", updateActive, { passive: true });
-    window.addEventListener("resize", updateActive);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    document.addEventListener("scrollend", finishNavigation);
+    window.addEventListener("resize", onResize);
     return () => {
-      window.removeEventListener("scroll", updateActive);
-      window.removeEventListener("resize", updateActive);
+      window.removeEventListener("scroll", onScroll);
+      document.removeEventListener("scrollend", finishNavigation);
+      window.removeEventListener("resize", onResize);
+      if (scrollIdleTimer.current !== null) window.clearTimeout(scrollIdleTimer.current);
     };
   }, []);
-  const go = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  const go = (id: string) => {
+    setActive(id);
+    const target = document.getElementById(id);
+    if (target && active !== id) pendingNavigation.current = id;
+    target?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
 
   return (
     <div className="landing-page">
       <nav className="landing-nav" aria-label="页面导航">
-        <a className="landing-wordmark" href="#wuhan" onClick={(event) => { event.preventDefault(); go("wuhan"); }}><span className="landing-mark">数</span><span>武汉数命 <i>SPU CITY CONCIERGE</i></span></a>
+        <a className="landing-wordmark" href="#wuhan" onClick={(event) => { event.preventDefault(); go("wuhan"); }}>Made By Kris Han</a>
         <div className="landing-nav-links">{navItems.map(([id, label]) => <button key={id} className={active === id ? "active" : ""} onClick={() => go(id)} aria-current={active === id ? "location" : undefined}>{label}</button>)}</div>
+        <button className="landing-assistant-entry" onClick={onOpenAssistant}><IconMessageCircle size={17}/> AI 接待员</button>
+        <button className="landing-assistant-entry" onClick={onOpenServices} title={`高德地图：${services?.amap.configured ? "已配置" : "未配置"}；AI：${services?.ai.provider || "未配置"} · ${services?.ai.model || "未配置"} · ${services?.ai.configured ? "已配置" : "未配置"}`}>服务连接 · 地图{services?.amap.configured ? "已配置" : "未配置"} · AI{services?.ai.configured ? "已配置" : "未配置"}</button>
       </nav>
 
       <section className="landing-hero" id="wuhan">
@@ -55,9 +93,9 @@ export function LandingPage({ onAsk, ...dashboardProps }: Props) {
         <div className="landing-hero-content">
           <p className="landing-eyebrow"><span /> WUHAN · CITY / PEOPLE / AI</p>
           <h1>{content.wuhan.headline}</h1>
-          <p className="landing-hero-subtitle">武汉数命 SPU 城市 AI 接待员</p>
+          <p className="landing-hero-subtitle">武汉数命 SPU 城市 AI 接待员 · SAIG 线上赛参赛作品</p>
           <p className="landing-hero-copy">{content.wuhan.summary}</p>
-          <button className="landing-primary" onClick={() => go("travel")}>开始探索武汉 <IconArrowUpRight size={18}/></button>
+          <button className="landing-primary" onClick={() => go("travel")}>探索武汉 <IconArrowUpRight size={18}/></button>
         </div>
         <div className="landing-coordinate">30°35′N&nbsp; 114°18′E <span>长江 · 汉江 · 武汉</span></div>
         <button className="landing-scroll-cue" onClick={() => go("spu")}><IconArrowDown size={16}/> 向下探索</button>
@@ -101,8 +139,8 @@ export function LandingPage({ onAsk, ...dashboardProps }: Props) {
       </section>
 
       <section className="landing-travel" id="travel">
-        <div className="landing-travel-heading"><p className="landing-eyebrow">03 / YOUR WUHAN JOURNEY</p><h2>现在，让 AI 带你<br/><em>认识武汉。</em></h2><p>沿着江城开始一段真实的旅程。搜索地点、和 AI 对话、在地图上组合你的武汉。</p><button onClick={dashboardProps.onPlan}>创建一段旅行 <IconArrowDown size={16}/></button></div>
-        <Dashboard {...dashboardProps}/>
+        <div className="landing-travel-heading"><p className="landing-eyebrow">03 / AI 城市接待</p><h2>现在，让 AI 带你<br/><em>认识武汉。</em></h2><p>武汉数命 SPU 城市 AI 接待员是 SAIG 数命 SPU 国际 AI 大赛参赛作品。了解城市、SPU 社区与赛事，也可以从这里开始规划武汉行程。</p><div className="landing-travel-actions"><button className="landing-create-trip" onClick={onPlan}>创建一段旅行 <IconArrowDown size={16}/></button>{currentTrip && <button className="landing-current-trip" onClick={() => onOpen(currentTrip)}>继续当前旅行：{currentTrip.name} <IconArrowUpRight size={16}/></button>}</div><span className="landing-entry-note">旅行资料保存在此浏览器 · {currentTrip ? "当前旅行可继续编辑" : "创建后可随时返回"}</span></div>
+        <div className="landing-travel-visual"><span>武汉数命 SPU 城市 AI 接待员</span><strong>从城市知识<br/>到一段真实行程</strong><div><i/>武汉 · 长江与汉江交汇</div></div>
       </section>
     </div>
   );
