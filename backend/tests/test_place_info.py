@@ -277,7 +277,7 @@ class PlaceInfoTest(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(client_factory.call_count, 1)
         self.assertEqual(len(fake_client.search_calls), 6)
-        self.assertTrue(second["cached"])
+        self.assertEqual(sorted([first["cached"], second["cached"]]), [False, True])
 
     async def test_second_pass_recovers_dynamic_fields(self):
         source = place_info._source(self.place, {

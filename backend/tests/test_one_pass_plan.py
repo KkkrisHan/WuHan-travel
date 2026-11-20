@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 
-from app.itinerary_doc import build_itinerary
+from app.itinerary_doc import _planning_pool, build_itinerary
 from app.models import Place, Point
 from app.one_pass_plan import decide_days_once
 from app.trip_intent import TripIntent
@@ -27,6 +27,14 @@ def trip(days=3):
 
 
 class OnePassDecisionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_optional_unknown_museum_is_replaced_before_model_decision(self):
+        required = poi("r", "必去地点", 0)
+        unknown = poi("u", "黎黄陂路街头博物馆", 1, "科教文化服务")
+        street = poi("s", "黎黄陂路", 2, "街区")
+        restaurant = poi("f", "餐厅", 3, "餐饮服务")
+        pool = _planning_pool([required, unknown, street, restaurant], [required], {}, "", 1)
+        self.assertEqual([place.placeId for place in pool], ["r", "s", "f"])
+
     async def test_verified_closed_date_is_explicit_model_constraint(self):
         required = poi("y", "黄鹤楼", 0)
         model = AsyncMock(return_value=json.dumps({"days": [

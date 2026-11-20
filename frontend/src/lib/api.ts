@@ -20,6 +20,7 @@ export type PlaceInfo = {
   checkedAt: string;
   stale: boolean;
   cached?: boolean;
+  knowledgeBase?: boolean;
   error?: string;
   conflict?: string;
   introduction: string;
@@ -120,6 +121,7 @@ export const api = {
   placeDetail: (placeId: string) => request<{ place: Place }>(`/places/${encodeURIComponent(placeId)}/detail`),
   reverseGeocode: (point: Point) => request<{ address: string; location: Point }>(`/places/reverse-geocode?lng=${point.lng}&lat=${point.lat}`),
   placeInfo: (place: Place, refresh = false, signal?: AbortSignal) => request<PlaceInfo>("/places/info", { method: "POST", body: JSON.stringify({ place, refresh }), signal }),
+  placeKnowledge: (place: Place, signal?: AbortSignal) => request<PlaceInfo | null>("/places/knowledge", { method: "POST", body: JSON.stringify({ place, refresh: false }), signal }),
   generateItinerary: (input: { mustVisitPlaces: Place[]; people: number; days: number; requirements: string; startDate: string | null; transport: string; company?: string; pace?: string; budget?: string; interests?: string[]; lodging: string; lodgingLocation?: Point | null }) =>
     request<{ title: string; markdown: string; recommendedPlaces: Place[]; routeSource: string; dayPlans: DayPlan[] }>("/itineraries/generate", {
       method: "POST", body: JSON.stringify(input),

@@ -58,7 +58,19 @@ def apply_official_seed():
                         source_kind=source_kind,
                         checked_at=REVIEWED_AT,
                         note="仅采用两来源共同支持的日间时段；夜上黄鹤楼另售票且具体日期场次未核实")
-    return {"museum": bool(museum), "tower": bool(tower)}
+    customs = names.get("江汉关博物馆")
+    if customs:
+        # 江汉区文化和旅游局 2026-11-04 公布；法定节假日另行通知。
+        url = "https://www.jianghan.gov.cn/zfxxgk/fdzdgknr/gysyjs/ggwhfw/gyxwhtyhd/202304/t20230427_2192804.shtml"
+        add_session(customs, kind="day", start_minute=540, end_minute=1020,
+                    last_entry_minute=960, weekdays=[1, 2, 3, 4, 5, 6],
+                    source_url=url, source_kind="official_government", checked_at=REVIEWED_AT,
+                    note="江汉区文旅局2026-11-04：周二至周日9:00-17:00，16:00停止入馆")
+        add_session(customs, kind="closure", start_minute=None, end_minute=None,
+                    weekdays=[0], is_closed=True, source_url=url,
+                    source_kind="official_government", checked_at=REVIEWED_AT,
+                    note="江汉区文旅局2026-11-04：周一闭馆，国家法定节假日除外")
+    return {"museum": bool(museum), "tower": bool(tower), "customs": bool(customs)}
 
 
 if __name__ == "__main__":

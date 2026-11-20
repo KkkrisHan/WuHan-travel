@@ -162,6 +162,26 @@ class PlanningTests(unittest.IsolatedAsyncioTestCase):
             await schedule_day(0, [gated], intent(requirements="展馆晚上要去"), {}, {}, None,
                                Router(("walking",), "适中"), date(2026, 11, 22))
 
+    async def test_unverified_evening_model_preference_moves_to_daytime(self):
+        gated = poi("museum", "展馆", 114.30, 30.55, "科教文化服务")
+        day, _, _ = await schedule_day(0, [gated], intent(),
+                                       {"museum": {"timeWindow": "evening"}}, {}, None,
+                                       Router(("walking",), "适中"), date(2026, 11, 22))
+        self.assertLessEqual(day.stops[0].departure, "17:30")
+        self.assertIn("入内时段尚未核实", day.warnings[0])
+
+    async def test_small_pace_overrun_is_warning(self):
+        stops = [poi("a", "景点甲", 114.30, 30.55), poi("b", "景点乙", 114.301, 30.55)]
+        hotel = Point(lng=114.299, lat=30.55)
+        async def route(*_):
+            return {"minutes": 95, "distanceMeters": 3000, "walkingMinutes": 5,
+                    "source": "高德地图路线规划", "polyline": []}
+        with patch("app.trip_intent.calculate_route", side_effect=route):
+            day, lines, _ = await schedule_day(0, stops, intent(), {}, {}, hotel,
+                                                Router(("transit",), "适中"), date(2026, 11, 22))
+        self.assertTrue(any("节奏目标" in warning for warning in day.warnings))
+        self.assertIn("行程提醒", "\n".join(lines))
+
     async def test_long_walk_uses_real_transit_and_unavailable_route_fails(self):
         start, end = Point(lng=114.30, lat=30.54), Point(lng=114.37, lat=30.58)
         async def route(_, __, mode):

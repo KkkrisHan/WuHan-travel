@@ -26,7 +26,7 @@ from .places import FEATURED, calculate_route, place_details, search_places
 from .planner import plan
 from .itinerary_doc import build_itinerary
 from .requirements_extract import extract_required_places
-from .place_info import get_place_info
+from .place_info import get_cached_place_knowledge, get_place_info
 from .request_context import request_id
 
 LOG_PATH = Path(__file__).resolve().parents[1] / "logs" / "backend.log"
@@ -182,6 +182,11 @@ class PlaceInfoRequest(BaseModel):
 @app.post("/api/places/info")
 async def places_info(request: PlaceInfoRequest):
     return await get_place_info(request.place, request.refresh)
+
+
+@app.post("/api/places/knowledge")
+async def places_knowledge(request: PlaceInfoRequest):
+    return await get_cached_place_knowledge(request.place)
 
 
 class ItineraryRequest(BaseModel):

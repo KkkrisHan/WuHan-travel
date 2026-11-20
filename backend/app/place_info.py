@@ -10,6 +10,7 @@ import sqlite3
 import time
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.robotparser import RobotFileParser
 
@@ -18,6 +19,7 @@ import httpx
 from .assistant import _model
 from .config import settings
 from .models import Place
+from .poi_knowledge.store import find_place, get_place_knowledge, save_research
 from .request_context import count_external, request_id
 
 FIELDS = ("openingHours", "todayNotice", "adultPrice", "discounts", "reservation", "reservationUrl", "phone", "address", "visitorNotes")
@@ -751,18 +753,116 @@ async def search_chat_web(query: str, limit: int = 5) -> list[dict]:
         return []
 
 
+def _knowledge_payload(place: Place) -> dict | None:
+    visit_date = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    knowledge = get_place_knowledge(place.poiId or place.placeId, visit_date)
+    if not knowledge:
+        knowledge = find_place(place.name, place.location.lng, place.location.lat, visit_date)
+    if not knowledge:
+        return None
+    sources: list[dict] = []
+    source_ids: dict[str, int] = {}
+    fields: dict[str, dict] = {}
+
+    def source_id(url: str, kind: str, checked: str) -> int:
+        if url not in source_ids:
+            source_ids[url] = len(sources) + 1
+            sources.append({"title": urlparse(url).hostname or url, "url": url,
+                            "publishedAt": None, "checkedAt": checked,
+                            "official": kind.startswith("official"), "sourceType": kind,
+                            "fetchStatus": "not_attempted", "fetchError": None})
+        return source_ids[url]
+
+    for name, fact in knowledge["fields"].items():
+        if fact["status"] != "verified":
+            continue
+        number = source_id(fact["sourceUrl"], fact["sourceType"], fact["checkedAt"])
+        fields[name] = {"value": fact["value"], "sourceId": number,
+                        "evidence": fact["value"], "checkedAt": fact["checkedAt"]}
+    opening = knowledge["sessions"]
+    if opening and opening["status"] in ("verified", "closed"):
+        valid = [s for s in opening["sessions"] if s["status"] == "verified"]
+        if valid:
+            first = valid[0]
+            number = source_id(first["sourceUrl"], first["sourceType"], first["checkedAt"])
+            if opening["status"] == "closed":
+                value = f"{visit_date.isoformat()} 闭馆或闭园"
+            else:
+                distinct = {(s["kind"], s["start"], s["end"]) for s in valid if not s["closed"]}
+                value = "；".join(
+                    f"{kind} {start//60:02d}:{start%60:02d}–{end//60:02d}:{end%60:02d}"
+                    for kind, start, end in sorted(distinct))
+                value = f"{visit_date.isoformat()} {value}"
+            fields["openingHours"] = {"value": value, "sourceId": number,
+                                      "evidence": first.get("note") or value,
+                                      "checkedAt": first["checkedAt"]}
+    if not fields:
+        return None
+    checked = max(s["checkedAt"] for s in sources)
+    return {"status": "verified" if "openingHours" in fields else "partial",
+            "checkedAt": checked, "stale": False, "cached": True, "knowledgeBase": True,
+            "fields": fields, "sources": sources,
+            "introduction": f"## {place.name}\n\n{place.description or '地点资料以所列来源为准。'}",
+            "conflict": ""}
+
+
+async def get_cached_place_knowledge(place: Place) -> dict | None:
+    """Return only locally stored, currently valid facts; never searches the web."""
+    try:
+        knowledge = await asyncio.to_thread(_knowledge_payload, place)
+        if knowledge and "openingHours" in knowledge["fields"]:
+            key = f"{PLACE_INFO_CACHE_VERSION}:{place.placeId}:{place.name}"
+            row = await asyncio.to_thread(_read_cache, key)
+            if row:
+                old = json.loads(row[0])
+                if isinstance(old.get("introduction"), str) and old["introduction"].strip():
+                    knowledge["introduction"] = old["introduction"]
+        return knowledge
+    except (sqlite3.Error, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _merge_knowledge(research: dict, knowledge: dict | None) -> dict:
+    if not knowledge:
+        return research
+    merged = {**research, "fields": dict(research.get("fields") or {}),
+              "sources": list(research.get("sources") or []), "knowledgeBase": True}
+    for name, field in knowledge["fields"].items():
+        source = knowledge["sources"][field["sourceId"] - 1]
+        existing = next((i for i, item in enumerate(merged["sources"], 1)
+                         if item.get("url") == source["url"]), None)
+        if existing is None:
+            merged["sources"].append(source)
+            existing = len(merged["sources"])
+        merged["fields"][name] = {**field, "sourceId": existing}
+    merged["status"] = "verified" if "openingHours" in knowledge["fields"] else merged.get("status", "partial")
+    merged["stale"] = False if "openingHours" in knowledge["fields"] else merged.get("stale", False)
+    merged["checkedAt"] = max(research.get("checkedAt") or "", knowledge["checkedAt"])
+    return merged
+
+
 async def get_place_info(place: Place, refresh: bool = False) -> dict:
     # Bump the key when evidence/query logic changes so old empty-field results
     # do not remain visible for the normal cache TTL after deployment.
     key = f"{PLACE_INFO_CACHE_VERSION}:{place.placeId}:{place.name}"
+    knowledge = await get_cached_place_knowledge(place)
+    if knowledge and "openingHours" in knowledge["fields"] and not refresh:
+        return knowledge
     lock = _PLACE_LOCKS.setdefault(key, asyncio.Lock())
     try:
         async with asyncio.timeout(PLACE_INFO_TIMEOUT):
             async with lock:
-                return await _get_place_info_locked(place, refresh, key)
+                research = await _get_place_info_locked(place, refresh, key)
     except asyncio.TimeoutError:
         _LOG.warning("place_info request_id=%s timeout place_id=%s total_timeout_s=%d", request_id.get(), place.placeId, PLACE_INFO_TIMEOUT)
-        return _failure(place, _now().isoformat(), None, "联网资料查询超时")
+        research = _failure(place, _now().isoformat(), None, "联网资料查询超时")
     except sqlite3.Error as exc:
         _LOG.error("place_info cache_error place_id=%s category=%s", place.placeId, type(exc).__name__)
-        return _failure(place, _now().isoformat(), None, "联网资料缓存暂不可用")
+        research = _failure(place, _now().isoformat(), None, "联网资料缓存暂不可用")
+    if research.get("fields") and not research.get("stale") and not research.get("cached"):
+        try:
+            await asyncio.to_thread(save_research, place, research)
+            knowledge = await asyncio.to_thread(_knowledge_payload, place)
+        except (sqlite3.Error, ValueError):
+            _LOG.warning("place_info_knowledge_save_failed place_id=%s", place.placeId)
+    return _merge_knowledge(research, knowledge)

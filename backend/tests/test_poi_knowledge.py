@@ -9,6 +9,7 @@ from app.config import settings
 from app.models import Place, Point
 from app.poi_knowledge.parse import parse_opening_evidence
 from app.opening_hours import collect_opening_hours
+from app.place_info import get_place_info
 from app.poi_knowledge.store import add_session, connection, find_place, get_opening_sessions, get_place_knowledge, save_place, save_research
 
 
@@ -107,6 +108,20 @@ class KnowledgeTests(unittest.TestCase):
             result = asyncio.run(collect_opening_hours([self.place], visit_date=date(2026, 11, 22),
                                                        required_ids={self.place.placeId}))
         self.assertIn(self.place.placeId, result)
+        web.assert_not_called()
+
+    def test_place_card_reads_verified_sessions_without_search(self):
+        self.rule(kind="day", start_minute=540, end_minute=1020)
+        with patch("app.place_info._get_place_info_locked") as web:
+            result = asyncio.run(get_place_info(self.place))
+        self.assertIn("09:00–17:00", result["fields"]["openingHours"]["value"])
+        self.assertTrue(result["knowledgeBase"])
+        self.assertEqual(result["sources"][result["fields"]["openingHours"]["sourceId"] - 1]["url"], self.url)
+        web.assert_not_called()
+        featured = self.place.model_copy(update={"placeId": "featured-museum"})
+        with patch("app.place_info._get_place_info_locked") as web:
+            matched = asyncio.run(get_place_info(featured))
+        self.assertIn("09:00–17:00", matched["fields"]["openingHours"]["value"])
         web.assert_not_called()
 
 

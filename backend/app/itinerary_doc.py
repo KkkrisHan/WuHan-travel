@@ -40,6 +40,22 @@ def _unique(places: list[Place]) -> list[Place]:
     return result
 
 
+def _planning_pool(pool: list[Place], required: list[Place], opening: dict[str, str],
+                   requirements: str, days: int) -> list[Place]:
+    """Keep optional indoor places with unknown entry rules out of a feasible pool."""
+    required_ids = {place.placeId for place in required}
+
+    def needs_entry_proof(place: Place) -> bool:
+        return place.category in ("博物馆", "科教文化服务", "校园") or any(
+            word in place.name for word in ("博物馆", "美术馆", "寺", "黄鹤楼"))
+
+    ready = [place for place in pool if place.placeId in required_ids
+             or place.name in requirements
+             or opening.get(place.placeId)
+             or not needs_entry_proof(place)]
+    return ready if len(ready) >= max(days, len(required) + 2) else pool
+
+
 async def _route_hints(required: list[Place], hotel: Point | None, router: Router) -> list[dict]:
     """Use available real route data with a fixed, small preplanning budget."""
     anchors = [(place.name, place.location) for place in required[:5]]
@@ -174,6 +190,7 @@ async def build_itinerary(request, progress: Callable[[int, str], Awaitable[None
                               required_ids={p.placeId for p in required}),
         _route_hints(required, hotel, router),
     )
+    pool = _planning_pool(pool, required, opening, intent.requirements, intent.days)
     await report(58, "根据完整要求一次性决定逐日路线")
     groups, details = await decide_days_once(
         intent, required, pool, opening, hotel, hints, _model

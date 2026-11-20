@@ -434,7 +434,6 @@ export function MapWorkspace({
   const [discovering, setDiscovering] = useState(false);
   const [discoveryNote, setDiscoveryNote] = useState("");
   const [placeInfo, setPlaceInfo] = useState<PlaceInfo | null>(null);
-  const [infoLoading, setInfoLoading] = useState(false);
   const infoRequestId = useRef(0);
   const infoController = useRef<AbortController | null>(null);
   const [candidates, setCandidates] = useState<Place[]>([]);
@@ -444,28 +443,16 @@ export function MapWorkspace({
     const id = ++infoRequestId.current;
     infoController.current?.abort();
     if (!selected) {
-      queueMicrotask(() => { if (id === infoRequestId.current) { setPlaceInfo(null); setInfoLoading(false); } });
+      queueMicrotask(() => { if (id === infoRequestId.current) setPlaceInfo(null); });
       return;
     }
     const controller = new AbortController();
     infoController.current = controller;
-    queueMicrotask(() => { if (id === infoRequestId.current) { setPlaceInfo(null); setInfoLoading(true); } });
-    api.placeInfo(selected, false, controller.signal).then(info => { if (id === infoRequestId.current) setPlaceInfo(info); })
-      .catch(error => { if (id === infoRequestId.current && !controller.signal.aborted) setPlaceInfo({ status: "unavailable", checkedAt: new Date().toISOString(), stale: false, introduction: "", fields: {}, sources: [], error: error instanceof Error ? error.message : "联网资料请求失败" }); })
-      .finally(() => { if (id === infoRequestId.current) setInfoLoading(false); });
+    queueMicrotask(() => { if (id === infoRequestId.current) setPlaceInfo(null); });
+    api.placeKnowledge(selected, controller.signal).then(info => { if (id === infoRequestId.current) setPlaceInfo(info?.knowledgeBase ? info : null); })
+      .catch(() => { if (id === infoRequestId.current && !controller.signal.aborted) setPlaceInfo(null); });
     return () => { infoController.current?.abort(); infoRequestId.current += 1; };
   }, [selected]);
-  const refreshInfo = () => {
-    if (!selected || infoLoading) return;
-    const id = ++infoRequestId.current;
-    infoController.current?.abort();
-    const controller = new AbortController();
-    infoController.current = controller;
-    setInfoLoading(true);
-    api.placeInfo(selected, true, controller.signal).then(info => { if (id === infoRequestId.current) setPlaceInfo(info); })
-      .catch(error => { if (id === infoRequestId.current && !controller.signal.aborted) setPlaceInfo(current => current ? { ...current, stale: true, error: error instanceof Error ? error.message : "联网资料请求失败" } : null); })
-      .finally(() => { if (id === infoRequestId.current) setInfoLoading(false); });
-  };
   useEffect(() => {
     let active = true;
     queueMicrotask(() => {
@@ -759,16 +746,13 @@ export function MapWorkspace({
           </div>
           {discoveryNote && <p role="status">{discoveryNote}</p>}
           {personalError && <div className="place-error" role="alert">{personalError} <button onClick={reloadPersonal}>重试</button></div>}
-          <div className="fact-status place-info">
-            <div className="place-info-heading">联网资料：<strong>{infoLoading && !placeInfo ? "正在查询…" : !placeInfo ? "尚未查询" : placeInfo.fields.openingHours ? (placeInfo.stale ? "开放时间来自旧数据" : "开放时间已核实") : placeInfo.error?.includes("超时") ? "查询超时" : placeInfo.error ? "查询失败" : "开放时间未核实"}</strong><button type="button" onClick={refreshInfo} disabled={infoLoading}>刷新</button></div>
-            {placeInfo && <><small>最后核查：{new Date(placeInfo.checkedAt).toLocaleString("zh-CN")}{placeInfo.stale ? " · 旧数据，搜索失败" : ""}；当日开放状态以景区公告为准。</small>
-              {placeInfo.error && <p role="alert">{placeInfo.error}</p>}
-              {placeInfo.conflict && /开放|时间|营业|闭馆|闭园/.test(placeInfo.conflict) && <p>开放时间来源冲突：{placeInfo.conflict}</p>}
-              <dl><div><dt>开放时间</dt><dd>{placeInfo.fields.openingHours ? <>{placeInfo.fields.openingHours.value} {placeInfo.sources[placeInfo.fields.openingHours.sourceId - 1]?.url && <a href={placeInfo.sources[placeInfo.fields.openingHours.sourceId - 1].url} target="_blank" rel="noopener noreferrer">[核实来源]</a>}</> : "尚未核实，请以景区官方公告为准"}</dd></div></dl>
-              {placeInfo.introduction && <div className="place-info-intro"><h4>地点介绍与游览建议</h4><ReactMarkdown remarkPlugins={[remarkGfm]}>{placeInfo.introduction}</ReactMarkdown></div>}
-              {placeInfo.sources.length > 0 && <div className="place-info-sources"><h4>信息来源</h4>{placeInfo.sources.map((source,index) => <p key={source.url}><a href={source.url} target="_blank" rel="noopener noreferrer">[{index+1}] {source.title}</a> {source.official ? "官方" : "第三方"} · {source.publishedAt ? `发布 ${source.publishedAt.slice(0,10)}` : "发布时间未标明"}</p>)}</div>}
-            </>}
-          </div>
+          {placeInfo?.knowledgeBase && placeInfo.fields.openingHours && <div className="fact-status place-info">
+            <div className="place-info-heading"><strong>本地知识库 · 开放时间</strong></div>
+            <small>最后核查：{new Date(placeInfo.fields.openingHours.checkedAt || placeInfo.checkedAt).toLocaleString("zh-CN")}</small>
+            <dl><div><dt>开放时间</dt><dd>{placeInfo.fields.openingHours.value} {placeInfo.sources[placeInfo.fields.openingHours.sourceId - 1]?.url && <a href={placeInfo.sources[placeInfo.fields.openingHours.sourceId - 1].url} target="_blank" rel="noopener noreferrer">[核实来源]</a>}</dd></div></dl>
+            {placeInfo.introduction && <div className="place-info-intro"><h4>地点介绍与游览建议</h4><ReactMarkdown remarkPlugins={[remarkGfm]}>{placeInfo.introduction}</ReactMarkdown></div>}
+            {placeInfo.sources.length > 0 && <div className="place-info-sources"><h4>信息来源</h4>{placeInfo.sources.map((source,index) => <p key={source.url}><a href={source.url} target="_blank" rel="noopener noreferrer">[{index+1}] {source.title}</a> {source.official ? "官方" : "第三方"} · {source.publishedAt ? `发布 ${source.publishedAt.slice(0,10)}` : "发布时间未标明"}</p>)}</div>}
+          </div>}
           <div className="place-actions">
             <button
               className="button secondary"

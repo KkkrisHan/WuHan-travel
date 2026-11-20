@@ -96,7 +96,7 @@ def main():
             print(json.dumps([dict(row) for row in rows] + missing, ensure_ascii=False, indent=2))
         return
     results = asyncio.run(refresh_many(FIRST_BATCH if args.all else [args.place], expired_only=args.expired_only))
-    if args.all or args.place in ("黄鹤楼", "湖北省博物馆"):
+    if args.all or args.place in ("黄鹤楼", "湖北省博物馆", "江汉关博物馆"):
         from .official_seed import apply_official_seed
         apply_official_seed()
     print(json.dumps({"results": results, "counts": {status: sum(r["status"] == status for r in results)

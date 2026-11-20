@@ -176,6 +176,10 @@ async def schedule_day(day: int, places: list[Place], intent: TripIntent, detail
                 explicit = preferred_time(intent.requirements, place.name)
                 if explicit:
                     target_name = explicit
+                elif not window and entry_sensitive(place) and target_name in ("evening", "night"):
+                    # Model timeWindow is a soft preference. Unknown indoor
+                    # evening entry should be placed in daytime when feasible.
+                    target_name = "afternoon"
                 target = {"morning": 10 * 60, "afternoon": 14 * 60, "evening": 17 * 60, "night": 18 * 60}.get(target_name)
                 if available and target:
                     window = next((w for w in available if w.start <= target and target + minutes <= w.end),
@@ -247,10 +251,12 @@ async def schedule_day(day: int, places: list[Place], intent: TripIntent, detail
             meal_is_stop = bool(lunch_time and any(place.category == "餐饮服务" and start <= lunch_time[0] < end
                                                 for place, start, end, _, _ in rows))
             day_load = transport + sum(row[3] for row in rows) + (60 if lunch_done and not meal_is_stop else 0)
-            limit = 570 if intent.pace == "舒缓" else 630 if intent.pace == "适中" else 690
-            if day_load > limit:
-                issues.append(f"第 {day+1} 天累计活动与交通 {day_load} 分钟，超过{intent.pace}节奏负担")
-            score = len(issues) * 10000 + soft_miss * 25 + transport * 1.1 + max(0, walk - 70) * 3 + max(0, now - 19 * 60) + abs(start - 10 * 60) / 10
+            target_load = 570 if intent.pace == "舒缓" else 630 if intent.pace == "适中" else 690
+            if day_load > target_load + 60:
+                issues.append(f"第 {day+1} 天累计活动与交通 {day_load} 分钟，超过可接受上限 {target_load + 60} 分钟")
+            elif day_load > target_load:
+                warnings.append(f"第 {day+1} 天累计活动与交通约 {day_load} 分钟，略高于{intent.pace}节奏目标 {target_load} 分钟")
+            score = len(issues) * 10000 + soft_miss * 25 + transport * 1.1 + max(0, walk - 70) * 3 + max(0, now - 19 * 60) + abs(start - 10 * 60) / 10 + max(0, day_load - target_load) * 5
             if best is None or score < best[0]:
                 best = (score, rows, return_route, warnings, issues, transport, walk, lunch_done, lunch_time, now)
     assert best is not None
@@ -318,6 +324,9 @@ async def schedule_day(day: int, places: list[Place], intent: TripIntent, detail
     if return_route:
         lines += [f"返回{intent.lodging}：{route_label(*return_route)}。", ""]
     lines += [f"当天预计交通 {transport} 分钟，其中步行路段约 {walk} 分钟；返回约 {clock(finish)}。", ""]
+    for warning in warnings:
+        if "节奏目标" in warning:
+            lines += [f"行程提醒：{warning}。", ""]
     return plan, lines, walk
 
 

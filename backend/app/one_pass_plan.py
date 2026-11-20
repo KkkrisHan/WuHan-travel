@@ -14,7 +14,7 @@ from fastapi import HTTPException
 from .experience_plan import decode
 from .models import Place, Point
 from .trip_intent import TripIntent, meters
-from .trip_schedule import visit_minutes
+from .trip_schedule import entry_sensitive, visit_minutes
 from .poi_knowledge.store import get_opening_sessions
 
 
@@ -32,6 +32,7 @@ async def decide_days_once(
 
     max_stops = 3 if intent.pace == "舒缓" else 4 if intent.pace == "适中" else 5
     day_budget = 570 if intent.pace == "舒缓" else 630 if intent.pace == "适中" else 690
+    hard_budget = day_budget + 60
 
     def approximate_minutes(a: Point, b: Point) -> int:
         """Only a rough pre-planning screening estimate, NOT a map direction."""
@@ -44,9 +45,26 @@ async def decide_days_once(
         crosses_river = (a.lng < 114.315) != (b.lng < 114.315)
         return round(15 + distance_km * 6 + (12 if crosses_river else 0))
 
+    def daytime_only(place: Place) -> bool:
+        if not entry_sensitive(place):
+            return False
+        if not intent.start_date:
+            return True
+        first = date.fromisoformat(intent.start_date)
+        for offset in range(intent.days):
+            evidence = get_opening_sessions(place.placeId, first + timedelta(days=offset))
+            if evidence["status"] == "verified" and any(
+                s["status"] == "verified" and not s["closed"] and s["end"] > 18 * 60
+                and (s["lastEntry"] is None or s["lastEntry"] >= 18 * 60)
+                for s in evidence["sessions"]
+            ):
+                return False
+        return True
+
     data = {
         "preferences": intent.context(),
         "dailyTimeBudgetMinutes": day_budget,
+        "dailyHardLimitMinutes": hard_budget,
         "mealMinutesUnlessRestaurantAlreadyScheduled": 60,
         "travelEstimatesAreRoughNotOfficial": True,
         "hotelLocation": hotel.model_dump() if hotel else None,
@@ -60,6 +78,7 @@ async def decide_days_once(
                 "address": p.address,
                 "location": p.location.model_dump(),
                 "openingHours": opening_hours.get(p.placeId, "未知，不能假定开放"),
+                "daytimeOnlyUnlessNightVerified": daytime_only(p),
                 "closedDates": [
                     (date.fromisoformat(intent.start_date) + timedelta(days=offset)).isoformat()
                     for offset in range(intent.days)
@@ -81,7 +100,8 @@ async def decide_days_once(
         "请在本次响应中一次性决定完整逐日行程和地点访问顺序；后续程序只执行排程校验，不会替你添加、"
         "删除、重排地点，也不会请你再规划。务必在本次规划中统筹住宿、地理位置、路线耗时、"
         "用餐、开放时段、同行需求、兴趣和每日日程负担。"
-        "dailyTimeBudgetMinutes 是一天允许的总负担，必须同时包含所有地点停留、"
+        "dailyTimeBudgetMinutes 是每天优先争取的舒适负担；超过时先减少可选地点或换更近的地点，"
+        "dailyHardLimitMinutes 是不可超过的上限。总负担必须同时包含所有地点停留、"
         "酒店出发和返程、地点间交通、以及独立午餐60分钟。餐厅作为午餐时不另外加60分钟。"
         "candidates 的 usualVisitMinutes 是各地点通常需要的停留时长，"
         "approxHotelOneWayMinutes 是地理距离初筛估计而非真实路线；"
@@ -90,10 +110,14 @@ async def decide_days_once(
         "每天从上午出发，尽量在19:00之前返回住宿地点。"
         "必须包含每个必去地点恰好一次；不同日期不要重复地点；每天至少一个地点；"
         "closedDates 是已核实闭馆的日期，绝对不能把该地点安排在这些日期；"
+        "daytimeOnlyUnlessNightVerified 为 true 的场馆或景点没有该行程日期可核实的夜间入内证据，"
+        "必须选上午或下午到访，尽量排在当天前两站，并在17:30前完成；不能因开放时间未知就断言它关闭。"
+        "若用户明确要求该地点夜游而缺少夜场证据，应说明资料不足，不能改成白天来冒充满足要求；"
         f"每日至多 {max_stops} 个停靠地点；餐厅算作停靠地点，不能在活动文案中再安排未列出的餐厅。"
         "优先同区域游览、减少跨江；如果是舒缓节奏，避免因凑数拉长交通时间。"
         "如果用户喜欢美食且候选中有餐厅，优先选用符合地域与路线的真实餐厅。"
         "开放信息未知不能写成已证实。timeWindow 的 morning/afternoon/evening 是到访偏好，"
+        "可选地点若缺少入内开放资料且很难安排在白天，选一个同区域、有明确时段或无需入内的候选地点；"
         "不能创造时间、门票、预约和具体交通数据。experience 只写在该地点停留期间能做的事情，"
         "绝不包含下一站、另一地点、额外用餐、时间长度或具体时钟。"
         "只输出一个 JSON 对象，不要 Markdown、不要解释："
